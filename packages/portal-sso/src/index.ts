@@ -23,6 +23,8 @@ if (typeof window !== 'undefined') {
 export class PortalSSO {
   readonly portalUrl: string;
   readonly clientId: string;
+  readonly tokenEndpoint: string;
+  private readonly tokenHeaders: Record<string,string>;
   readonly redirectUri: string;
   readonly scope: string;
   readonly storageKey: string;
@@ -39,6 +41,9 @@ export class PortalSSO {
     const defaultOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8080';
     this.portalUrl = (config.portalUrl || defaultOrigin).replace(/\/$/, '');
     this.clientId = config.clientId;
+    if (config.tokenEndpoint && new URL(config.tokenEndpoint, defaultOrigin).origin !== defaultOrigin) throw new Error('Token relay must be same-origin');
+    this.tokenEndpoint = config.tokenEndpoint || this.portalUrl + '/oauth2/token';
+    this.tokenHeaders = config.tokenEndpoint ? { 'X-Portal-Token-Relay': '1' } : {};
     this.redirectUri = config.redirectUri || `${this.portalUrl}/oauth2/popup-callback`;
     this.scope = config.scope || 'openid profile email';
     this.storageKey = config.storageKey || 'portal_sso_session';
@@ -195,7 +200,7 @@ export class PortalSSO {
    * Exchanges authorization code for tokens using PKCE verifier.
    */
   async exchangeCodeForTokens(code: string, codeVerifier: string, redirectUri: string): Promise<PortalSession> {
-    const tokenEndpoint = `${this.portalUrl}/oauth2/token`;
+    const tokenEndpoint = this.tokenEndpoint;
 
     const body = new URLSearchParams();
     body.append('grant_type', 'authorization_code');
@@ -207,7 +212,7 @@ export class PortalSSO {
     const res = await fetch(tokenEndpoint, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        ...this.tokenHeaders, 'Content-Type': 'application/x-www-form-urlencoded',
       },
       body: body.toString(),
     });
@@ -313,9 +318,9 @@ export class PortalSSO {
           client_id: this.clientId,
           refresh_token: session.refreshToken!,
         });
-        const response = await fetch(`${this.portalUrl}/oauth2/token`, {
+        const response = await fetch(this.tokenEndpoint, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: { ...this.tokenHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
           body: body.toString(),
         });
         if (!response.ok) {

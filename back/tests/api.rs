@@ -285,3 +285,86 @@ async fn reactions_survive_restart_and_readiness_detects_storage_failure() {
         }
     }
 }
+
+#[tokio::test]
+async fn token_relay_validates_and_forwards_public_pkce() {
+    use axum::{Form, Json, Router, routing::post};
+    use std::collections::HashMap;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/oauth2/token",
+                post(|Form(form): Form<HashMap<String, String>>| async move {
+                    assert_eq!(form["client_id"], "keystone-test");
+                    assert!(!form.contains_key("client_secret"));
+                    assert!(!form.contains_key("extra"));
+                    if form["grant_type"] == "authorization_code" {
+                        assert_eq!(form["code_verifier"].len(), 64);
+                    }
+                    Json(json!({"access_token":"test-only-token","token_type":"Bearer"}))
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    let mut cfg = config();
+    cfg.portal_url = origin.clone();
+    let app = router(state(cfg).await.unwrap());
+    for (form, header, expected) in [
+        (
+            format!(
+                "grant_type=authorization_code&client_id=keystone-test&code=test&code_verifier={}&redirect_uri={}/oauth2/popup-callback&extra=discard",
+                "a".repeat(64),
+                origin
+            ),
+            true,
+            StatusCode::OK,
+        ),
+        (
+            "grant_type=refresh_token&client_id=keystone-test&refresh_token=test".into(),
+            true,
+            StatusCode::OK,
+        ),
+        (
+            "grant_type=client_credentials&client_id=keystone-test".into(),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "grant_type=authorization_code&client_id=keystone-test&code=test".into(),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "grant_type=refresh_token&client_id=wrong&refresh_token=test".into(),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "grant_type=refresh_token&client_id=keystone-test&refresh_token=test".into(),
+            false,
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let mut request = Request::post("/api/v1/auth/token")
+            .header("content-type", "application/x-www-form-urlencoded");
+        if header {
+            request = request.header("x-portal-token-relay", "1");
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(form)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        if expected == StatusCode::OK {
+            assert_eq!(body(response).await["access_token"], "test-only-token");
+        }
+    }
+    upstream.abort();
+}

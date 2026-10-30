@@ -3,6 +3,7 @@ pub mod auth;
 pub mod blog;
 pub mod config;
 pub mod error;
+pub mod token;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -87,6 +88,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health/ready", get(ready))
         .route("/api/v1/info", get(|| async {Json(json!({"name":"Keystone","version":env!("CARGO_PKG_VERSION"),"apiVersion":"v1"}))}))
         .route("/api/v1/auth/config", get(auth_config))
+        .route("/api/v1/auth/token", axum::routing::post(token::exchange))
         .route("/api/{*path}", get(not_found).post(not_found).put(not_found).delete(not_found))
         .fallback_service(static_files)
         .layer(DefaultBodyLimit::max(16*1024))

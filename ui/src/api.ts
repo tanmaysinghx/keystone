@@ -16,7 +16,7 @@ export class Api {
     const config=await firstValueFrom(this.http.get<AuthConfig>('/api/v1/auth/config').pipe(timeout(6000)));
     if(config.configured && (!this.sso || this.sso.portalUrl!==config.portalUrl || this.sso.clientId!==config.clientId)) {
       this.sso?.logout();
-      this.sso=new PortalSSO({portalUrl:config.portalUrl,clientId:config.clientId,scope:config.scope,storageKey:'keystone:portal-session'});
+      this.sso=new PortalSSO({portalUrl:config.portalUrl,clientId:config.clientId,scope:config.scope,storageKey:'keystone:portal-session',tokenEndpoint:'/api/v1/auth/token'});
     }
     return config;
   }

@@ -36,6 +36,8 @@ export interface PortalSSOConfig {
    * e.g. "eggless-observability"
    */
   clientId: string;
+  /** Optional same-origin token relay. */
+  tokenEndpoint?: string;
 
   /**
    * The OAuth 2.1 redirect URI.

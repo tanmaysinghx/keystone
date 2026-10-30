@@ -43,3 +43,7 @@ Do not call this backend endpoint directly from browser code or expose its share
 ```
 
 `status` is `up`, `down`, or `unconfigured`. External checks require a successful HTTP status; Portal additionally verifies the discovery issuer. A 200 health endpoint is not proof that every operation within a remote service works. External checks run concurrently and have bounded timeouts. The UI shows stale results as Unknown on refresh failure.
+
+## Browser token transport
+
+POST `/api/v1/auth/token` accepts URL-encoded public-client authorization-code/PKCE and refresh-token grants with `X-Portal-Token-Relay: 1`. Keystone forwards only validated fields to its configured Portal issuer, with its configured client ID and fixed Portal popup callback. It returns OAuth token/error JSON, never caches responses, and does not enable cross-origin access. Both initial sign-in and refresh use this same-origin relay because Portal token responses may omit browser CORS headers.
