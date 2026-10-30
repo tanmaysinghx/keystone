@@ -1,6 +1,33 @@
-# Keystone
+<p align="center">
+  <img src="ui/public/logo.svg" width="96" height="96" alt="Keystone logo" />
+</p>
 
-A separate Rust + Angular monorepo for shared portfolio services. The first service stores blog likes and daily unique views; the admin console shows live service checks and post activity. Portal SSO is the only admin identity provider.
+<h1 align="center">Keystone</h1>
+
+<p align="center">
+  <strong>Shared portfolio services with a Portal SSO-protected admin console.</strong><br />
+  Rust backend. Angular dashboard. One workspace for service health and blog activity.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-Backend-047857?logo=rust&amp;logoColor=white" alt="Rust backend" />
+  <img src="https://img.shields.io/badge/Angular-21-059669?logo=angular&amp;logoColor=white" alt="Angular 21" />
+  <img src="https://img.shields.io/badge/SQLite-Storage-065F46?logo=sqlite&amp;logoColor=white" alt="SQLite storage" />
+  <img src="https://img.shields.io/badge/Portal_SSO-PKCE-047857" alt="Portal SSO with PKCE" />
+</p>
+
+---
+
+## What you get
+
+- **Admin console:** a Portal-style workspace with emerald accents, service navigation, and an account panel.
+- **Portal SSO:** popup sign-in with PKCE and session refresh; every admin API requires a verified access token and the administrator role.
+- **Live service checks:** API, database, Portal connectivity, and configured service monitors, refreshed every 15 seconds while the dashboard is visible.
+- **Blog reactions:** persistent likes and daily unique views, with duplicate-safe retries and per-post activity totals.
+- **Graceful outages:** the portfolio remains readable when Keystone is unavailable and displays a small retry message.
+- **Single monorepo:** the Rust server serves the compiled Angular UI and same-origin APIs, backed by SQLite.
+
+---
 
 ## Layout
 
