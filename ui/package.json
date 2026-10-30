@@ -1,0 +1,9 @@
+{
+  "name": "keystone-ui", "private": true, "version": "0.1.0",
+  "scripts": {"prestart":"npm --prefix ../packages/portal-sso run build", "start":"ng serve --port 4300 --proxy-config proxy.conf.json", "prebuild":"npm --prefix ../packages/portal-sso run build", "build":"ng build", "pretest":"npm --prefix ../packages/portal-sso run build", "test":"ng test --watch=false"},
+  "dependencies": {
+    "@angular/common":"^21.0.0", "@angular/compiler":"^21.0.0", "@angular/core":"^21.0.0",
+    "@angular/platform-browser":"^21.0.0", "@tanmaysinghx/portal-sso":"file:../packages/portal-sso", "rxjs":"^7.8.0", "tslib":"^2.3.0"
+  },
+  "devDependencies": {"@angular/build":"^21.0.4", "@angular/cli":"^21.0.4", "@angular/compiler-cli":"^21.0.0", "typescript":"~5.9.2", "vitest":"^4.0.8", "jsdom":"^27.1.0"}
+}

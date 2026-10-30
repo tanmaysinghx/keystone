@@ -1,0 +1,7 @@
+{
+  "name":"@tanmaysinghx/portal-sso","version":"1.0.0-keystone.1","private":true,"type":"module",
+  "main":"dist/index.js","types":"dist/index.d.ts",
+  "exports":{".":{"types":"./dist/index.d.ts","default":"./dist/index.js"}},
+  "scripts":{"build":"node ../../ui/node_modules/typescript/bin/tsc -p tsconfig.json"},
+  "license":"Apache-2.0","author":"Tanmay Singh"
+}

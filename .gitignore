@@ -1,0 +1,13 @@
+/target/
+/ui/node_modules/
+/ui/dist/
+/ui/.angular/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+/data/
+/packages/portal-sso/dist/
+*.log

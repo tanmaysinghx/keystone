@@ -1,0 +1,11 @@
+{
+  "name": "keystone", "private": true, "version": "0.1.0",
+  "scripts": {
+    "dev:back": "cargo run -p keystone",
+    "dev:ui": "npm --prefix ui start",
+    "build:ui": "npm --prefix ui run build",
+    "build:back": "cargo build --release -p keystone",
+    "test:back": "cargo test --workspace",
+    "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
+  }
+}

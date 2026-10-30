@@ -1,0 +1,15 @@
+{
+  "application": {
+    "name": "Keystone",
+    "description": "Admin service console and portfolio reactions",
+    "appUrl": "http://localhost:4300",
+    "accessType": "RESTRICTED",
+    "externalAuthEnabled": false
+  },
+  "oauthClient": {
+    "clientId": "keystone",
+    "redirectUris": ["http://localhost:4300"],
+    "scopes": ["openid", "profile", "email"],
+    "confidential": false
+  }
+}
