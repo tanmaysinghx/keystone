@@ -14,6 +14,10 @@ All JSON responses use `Cache-Control: no-store`. Request responses carry `X-Req
 | GET | `/api/v1/admin/posts?page=0` | Portal access token + `ROLE_ADMIN` | 50 post summaries per page |
 | GET | `/api/v1/blog/stats?slug=example` | `X-Keystone-Key` | Read counts |
 | POST | `/api/v1/blog/stats` | `X-Keystone-Key` | Idempotent like or daily view |
+| * | `/api/v1/admin/vault/**` | Portal access token + `ROLE_ADMIN` | Manage vault applications, environments, keys, files, versions and tokens |
+| GET | `/api/v1/vault/**`, `/config/{app}/{profile}` | Keystone application token (`ksv_…`) | Applications load secrets and configuration at startup |
+
+The vault endpoints are documented in [VAULT.md](VAULT.md).
 
 ## Blog contract
 

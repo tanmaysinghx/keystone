@@ -2,8 +2,9 @@ import { Component, OnDestroy, OnInit, inject, signal, computed } from '@angular
 import { CommonModule } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { Api, Admin, AuthConfig, Health, Overview, PostPage } from './api';
+import { VaultComponent } from './vault';
 
-@Component({selector:'app-root',standalone:true,imports:[CommonModule],templateUrl:'./app.html'})
+@Component({selector:'app-root',standalone:true,imports:[CommonModule,VaultComponent],templateUrl:'./app.html'})
 export class AppComponent implements OnInit,OnDestroy {
   private api=inject(Api);
   readonly config=signal<AuthConfig|null>(null);
@@ -18,10 +19,10 @@ export class AppComponent implements OnInit,OnDestroy {
   readonly page=signal(0);
   readonly menuOpen=signal(false);
   readonly search=signal('');
-  readonly navigation=[{id:'overview',label:'Overview'},{id:'services',label:'Services'},{id:'blog',label:'Blog activity'}];
+  readonly navigation=[{id:'vault',label:'Vault: secrets & config'},{id:'overview',label:'Overview'},{id:'services',label:'Services'},{id:'blog',label:'Blog activity'}];
   readonly matches=computed(()=>this.navigation.filter(item=>item.label.toLowerCase().includes(this.search().trim().toLowerCase())));
-  readonly section=signal('overview');
-  navigate(section:string):void {this.section.set(section);this.menuOpen.set(false);this.search.set('');}
+  readonly section=signal(location.hash==='#overview'||location.hash==='#services'||location.hash==='#blog'?location.hash.slice(1):'vault');
+  navigate(section:string):void {this.section.set(section);this.menuOpen.set(false);this.search.set('');if(section!=='vault')setTimeout(()=>document.getElementById(section)?.scrollIntoView());}
 
   readonly up=computed(()=>this.health()?.services.filter(s=>s.status==='up').length??0);
   private timer?:ReturnType<typeof setInterval>;
@@ -67,7 +68,7 @@ export class AppComponent implements OnInit,OnDestroy {
   }
   changePage(delta:number):void {this.page.update(p=>Math.max(0,p+delta));void this.refresh();}
   logout():void {
-    this.menuOpen.set(false);this.search.set('');this.section.set('overview');
+    this.menuOpen.set(false);this.search.set('');this.section.set('vault');
     this.generation++;if(this.timer)clearInterval(this.timer);this.timer=undefined;
     this.api.logout();this.admin.set(null);this.health.set(null);this.overview.set(null);this.posts.set(null);this.page.set(0);this.busy.set(false);this.error.set('');
   }

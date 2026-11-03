@@ -1,0 +1,261 @@
+<section id="vault" class="page-heading" tabindex="-1">
+  <div><p class="eyebrow">KEYSTONE VAULT</p><h1>Secrets &amp; configuration</h1><p class="lede">Encrypted keys and whole configuration files for every Portal application, loaded by each app at startup.</p></div>
+  <button class="primary" [disabled]="busy() || status()?.sealed" (click)="openNewApp()">New application <span>+</span></button>
+</section>
+
+@if(status()?.sealed){<div class="notice error" role="alert"><strong>The vault is sealed.</strong> <span>Set <code>KEYSTONE_MASTER_KEY</code> (32 random bytes, base64 — <code>openssl rand -base64 32</code>) on the Keystone server and restart. Back the key up: without it no stored secret can be decrypted.</span></div>}
+@if(error()){<div class="notice error" role="alert">{{error()}}</div>}
+@if(toast()){<div class="toast" role="status">{{toast()}}</div>}
+
+<section class="metrics" aria-label="Vault totals">
+  <div><span>Applications</span><strong>{{status()?.apps ?? '—'}}</strong><p>Each with its own data key</p></div>
+  <div><span>Keys</span><strong>{{status()?.keys ?? '—'}}</strong><p>Individual properties</p></div>
+  <div><span>Files</span><strong>{{status()?.files ?? '—'}}</strong><p>Whole configuration files</p></div>
+  <div><span>Active tokens</span><strong>{{status()?.activeTokens ?? '—'}}</strong><p>Read-only app credentials</p></div>
+</section>
+
+<div class="vault-layout">
+  <aside class="app-list" aria-label="Vault applications">
+    <p class="nav-caption">Applications</p>
+    @for(app of apps(); track app.id){
+      <button class="app-row" [class.active]="app.id===selectedId()" (click)="select(app.id)" [attr.aria-current]="app.id===selectedId()?'true':null">
+        <span class="service-icon" aria-hidden="true">{{app.name.slice(0,2).toUpperCase()}}</span>
+        <span class="app-meta"><strong>{{app.name}}</strong><small>{{app.id}} · {{app.keyCount}} keys · {{app.fileCount}} files</small></span>
+      </button>
+    } @empty {
+      <p class="fine empty-list">{{loaded() ? 'No applications yet. Create one for each Portal app that needs secrets.' : 'Loading…'}}</p>
+    }
+  </aside>
+
+  @if(selected(); as app){
+  <section class="app-detail" aria-live="polite">
+    <header class="detail-head">
+      <div>
+        <h2>{{app.name}}</h2>
+        <p class="fine">
+          <code>{{app.id}}</code>
+          @if(app.portalClientId){ · Portal client <a [href]="portalUrl() || '#'" target="_blank" rel="noopener"><code>{{app.portalClientId}}</code> ↗</a>}
+          @else{ · not linked to a Portal client}
+          @if(app.description){ · {{app.description}}}
+        </p>
+      </div>
+      <button class="quiet danger" [disabled]="busy()" (click)="askDeleteApp()">Delete application</button>
+    </header>
+
+    <div class="env-bar" role="tablist" aria-label="Environments">
+      @for(e of app.environments; track e){
+        <button role="tab" class="env" [class.active]="e===env()" [attr.aria-selected]="e===env()" (click)="chooseEnv(e)">{{e}}@if(e==='default'){<small>inherited</small>}</button>
+      }
+      <span class="env-add"><input aria-label="New environment name" placeholder="new environment" [value]="newEnv()" (input)="newEnv.set($any($event.target).value)" (keydown.enter)="addEnv()" maxlength="40"><button class="quiet" [disabled]="busy() || !newEnv().trim()" (click)="addEnv()">Add</button></span>
+    </div>
+    <p class="fine env-hint">@if(env()==='default'){Keys and files here apply to every environment unless an environment overrides them.}@else{<strong>{{env()}}</strong> inherits everything from <strong>default</strong> and overrides matching keys. <button class="link danger" (click)="askDeleteEnv()">Delete {{env()}}</button>}</p>
+
+    <nav class="tabs" aria-label="Application sections">
+      @for(t of [['keys','Keys'],['files','Files'],['tokens','Access tokens'],['integrate','Load at startup'],['activity','Activity']]; track t[0]){
+        <button [class.active]="tab()===t[0]" [attr.aria-current]="tab()===t[0]?'page':null" (click)="chooseTab($any(t[0]))">{{t[1]}}</button>
+      }
+    </nav>
+
+    @switch(tab()){
+    @case('keys'){
+      <div class="toolbar">
+        <input class="search" aria-label="Filter keys" placeholder="Filter keys…" [value]="filter()" (input)="filter.set($any($event.target).value)">
+        <span class="spacer"></span>
+        <button class="quiet" [disabled]="busy()" (click)="exportConfig('properties')" title="Download the merged configuration this environment's apps receive">Export .properties</button>
+        <button class="quiet" [disabled]="busy()" (click)="exportConfig('env')">Export .env</button>
+        <button class="quiet" [disabled]="busy()" (click)="openImport()">Import file</button>
+        <button class="primary" [disabled]="busy()" (click)="openEditor()">Add key <span>+</span></button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Key</th><th>Value</th><th>Version</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+        @for(item of keys(); track item.name){
+          <tr>
+            <td><code class="key">{{item.name}}</code></td>
+            <td class="value">@if(revealed()[item.name] !== undefined){<code class="secret">{{revealed()[item.name] || '(empty)'}}</code>}@else{<span class="mask" aria-label="hidden value">••••••••••</span>}</td>
+            <td>v{{item.version}}</td>
+            <td class="fine">{{item.updatedAt*1000 | date:'MMM d, HH:mm'}}<br>{{who(item.updatedBy)}}</td>
+            <td class="actions">
+              <button class="icon" (click)="reveal(item.name)" [attr.aria-label]="(revealed()[item.name]!==undefined?'Hide ':'Reveal ')+item.name">{{revealed()[item.name]!==undefined?'Hide':'Reveal'}}</button>
+              <button class="icon" (click)="copyKey(item.name)" [attr.aria-label]="'Copy '+item.name">Copy</button>
+              <button class="icon" (click)="openEditor(item.name)" [attr.aria-label]="'Edit '+item.name">Edit</button>
+              <button class="icon" (click)="showHistory('keys', item.name)" [attr.aria-label]="'History of '+item.name">History</button>
+              <button class="icon danger" (click)="askDelete('keys', item.name)" [attr.aria-label]="'Delete '+item.name">Delete</button>
+            </td>
+          </tr>
+        } @empty {
+          <tr><td colspan="5" class="empty">{{filter() ? 'No keys match the filter.' : 'No keys in ' + env() + ' yet. Add one, or import an existing .properties / .env file to split it into keys.'}}</td></tr>
+        }
+        </tbody>
+      </table></div>
+    }
+    @case('files'){
+      <div class="toolbar">
+        <p class="fine">Store a file whole: <code>application.properties</code>, YAML, JSON service accounts, certificates (512 KiB max). <code>.properties</code> files are also merged into the configuration apps receive.</p>
+        <span class="spacer"></span>
+        <label class="primary file-button">Upload file <span>↑</span><input type="file" (change)="upload($event)" [disabled]="busy()"></label>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>File</th><th>Type</th><th>Size</th><th>Version</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+        @for(item of files(); track item.name){
+          <tr>
+            <td><code class="key">{{item.name}}</code></td><td class="fine">{{item.contentType}}</td><td>{{size(item.size)}}</td><td>v{{item.version}}</td>
+            <td class="fine">{{item.updatedAt*1000 | date:'MMM d, HH:mm'}}<br>{{who(item.updatedBy)}}</td>
+            <td class="actions">
+              <button class="icon" (click)="download(item.name)">Download</button>
+              <button class="icon" (click)="showHistory('files', item.name)">History</button>
+              <button class="icon danger" (click)="askDelete('files', item.name)">Delete</button>
+            </td>
+          </tr>
+        } @empty {<tr><td colspan="6" class="empty">No files in {{env()}}. Upload a whole configuration file to serve it byte for byte.</td></tr>}
+        </tbody>
+      </table></div>
+    }
+    @case('tokens'){
+      <div class="toolbar">
+        <p class="fine">Applications authenticate with a read-only token bound to one environment. Portal SSO has no machine-to-machine grant yet, so these are Keystone credentials; tokens are stored only as hashes.</p>
+        <span class="spacer"></span>
+        <button class="primary" [disabled]="busy()" (click)="openTokenForm()">Issue token <span>+</span></button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Environment</th><th>Last used</th><th>Expires</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+        @for(t of tokens(); track t.id){
+          <tr [class.muted]="!t.active">
+            <td><strong>{{t.name}}</strong><br><code class="fine">ksv_{{t.id}}…</code></td>
+            <td><span class="pill">{{t.environment}}</span></td>
+            <td class="fine">{{t.lastUsedAt ? (t.lastUsedAt*1000 | date:'MMM d, HH:mm') : 'Never'}}</td>
+            <td class="fine">{{t.expiresAt ? (t.expiresAt*1000 | date:'mediumDate') : 'Never'}}</td>
+            <td><span class="status" [class.down]="!t.active"><span class="dot"></span>{{t.revokedAt ? 'Revoked' : t.active ? 'Active' : 'Expired'}}</span></td>
+            <td class="actions">@if(t.active){<button class="icon danger" (click)="askRevoke(t)">Revoke</button>}</td>
+          </tr>
+        } @empty {<tr><td colspan="6" class="empty">No tokens. Issue one per deployed application instance or environment.</td></tr>}
+        </tbody>
+      </table></div>
+    }
+    @case('integrate'){
+      <p class="fine">Give the application <code>KEYSTONE_TOKEN</code> (issued under <strong>Access tokens</strong>) and <code>KEYSTONE_URL={{origin}}</code>. The token decides the environment; <strong>{{env()}}</strong> inherits from <strong>default</strong>.</p>
+      <nav class="tabs small" aria-label="Integration type">
+        @for(s of [['spring','Spring Boot'],['node','Node.js'],['shell','Docker / shell'],['file','Files & single keys']]; track s[0]){
+          <button [class.active]="snippet()===s[0]" (click)="snippet.set($any(s[0]))">{{s[1]}}</button>
+        }
+      </nav>
+      <div class="code-block"><button class="quiet copy" (click)="copy(snippets()[snippet()], 'Snippet copied')">Copy</button><pre><code>{{snippets()[snippet()]}}</code></pre></div>
+      @if(snippet()==='spring'){<p class="fine">Keystone speaks the Spring Cloud Config Server protocol, so Spring Boot apps across the Portal suite load secrets before the context starts, with no custom code. <code>spring.application.name</code> must equal <code>{{selectedId()}}</code>.</p>}
+      @if(!tokens().length){<div class="notice">This application has no tokens yet. <button class="link" (click)="chooseTab('tokens')">Issue one →</button></div>}
+    }
+    @case('activity'){
+      <div class="toolbar">
+        <label class="check-inline"><input type="checkbox" [checked]="pullsOnly()" (change)="togglePulls($any($event.target).checked)"> Secret pulls only <span class="fine">(app reads, admin reveals, refused tokens)</span></label>
+        <span class="spacer"></span>
+        <button class="quiet" [disabled]="busy()" (click)="chooseTab('activity')">Refresh ↻</button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>When</th><th>Who</th><th>Action</th><th>What</th><th>IP address</th><th>Client</th></tr></thead>
+        <tbody>
+        @for(e of audit(); track e.id){
+          <tr [class.alert]="e.event==='vault.token.denied'">
+            <td class="fine nowrap">{{e.createdAt*1000 | date:'MMM d, HH:mm:ss'}}</td>
+            <td>@if(isApp(e.subject)){<span class="pill">app</span> }{{who(e.subject)}}</td>
+            <td>{{label(e.event)}}</td>
+            <td><code class="fine">{{e.target}}</code></td>
+            <td><code>{{e.ip || '—'}}</code></td>
+            <td class="fine" [title]="e.userAgent || ''">{{client(e.userAgent)}}</td>
+          </tr>
+        } @empty {<tr><td colspan="6" class="empty">{{pullsOnly() ? 'Nothing has pulled secrets from this application yet.' : 'No activity recorded.'}}</td></tr>}
+        </tbody>
+      </table></div>
+      <p class="fine">Every reveal, change, token use, refused token and configuration read is recorded with its IP address and client, newest first (last 500). Behind a reverse proxy, set <code>KEYSTONE_TRUST_PROXY=true</code> so the client's address is recorded rather than the proxy's.</p>
+    }
+    }
+  </section>
+  } @else if(loaded() && !status()?.sealed) {
+    <section class="app-detail empty-state"><h2>Store your first secrets</h2><p class="lede">Create an application for each Portal app (use its Portal client id), add keys or upload its <code>.properties</code>, then issue a token so it loads everything at startup.</p><button class="primary" (click)="openNewApp()">New application <span>+</span></button></section>
+  }
+</div>
+
+<!-- Dialogs -->
+@if(newApp(); as f){
+<div class="modal-backdrop" (click)="newApp.set(null)"></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="new-app-title">
+  <h2 id="new-app-title">New application</h2>
+  <label>Name<input [value]="f.name" (input)="patchNewApp({name:$any($event.target).value})" maxlength="80" placeholder="Billing Service" autofocus></label>
+  <label>Keystone id<input [value]="f.id" (input)="patchNewApp({id:$any($event.target).value})" maxlength="63" placeholder="billing-service"><small>Lowercase slug. Spring apps use it as <code>spring.application.name</code>.</small></label>
+  <label>Portal client id<input [value]="f.portalClientId" (input)="patchNewApp({portalClientId:$any($event.target).value})" maxlength="63" placeholder="billing-service"><small>The app's <code>client_id</code> in Portal SSO, linking both registries.</small></label>
+  <label>Description<input [value]="f.description" (input)="patchNewApp({description:$any($event.target).value})" maxlength="500"></label>
+  <label>Environments<input [value]="f.environments" (input)="patchNewApp({environments:$any($event.target).value})"><small>Comma separated. <code>default</code> is always created and inherited by the others.</small></label>
+  <div class="modal-actions"><button class="quiet" (click)="newApp.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !f.name.trim() || !f.id.trim()" (click)="createApp()">Create application</button></div>
+</div>
+}
+
+@if(editor(); as e){
+<div class="modal-backdrop" (click)="editor.set(null)"></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+  <h2 id="editor-title">{{e.isNew ? 'Add key to ' + env() : 'Edit ' + e.name}}</h2>
+  @if(e.isNew){<label>Key<input [value]="e.name" (input)="editor.set({name:$any($event.target).value,value:e.value,isNew:true})" placeholder="spring.datasource.password" maxlength="200" autofocus><small>Letters, digits and <code>. _ - [ ]</code>. Environment variable form is derived automatically.</small></label>}
+  <label>Value<textarea rows="6" [value]="e.value" (input)="editor.set({name:e.name,value:$any($event.target).value,isNew:e.isNew})" spellcheck="false" autocomplete="off"></textarea><small>Saving creates a new version; the last 20 versions are kept for rollback.</small></label>
+  <div class="modal-actions"><button class="quiet" (click)="editor.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !e.name.trim()" (click)="saveKey()">Save</button></div>
+</div>
+}
+
+@if(importer(); as i){
+<div class="modal-backdrop" (click)="importer.set(null)"></div>
+<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="import-title">
+  <h2 id="import-title">Import into {{env()}}</h2>
+  <p class="fine">Splits a file into individual keys. Unchanged values are skipped. To keep a file whole instead, upload it under <strong>Files</strong>.</p>
+  <div class="row"><label>Format<select [value]="i.format" (change)="importer.set({format:$any($event.target).value,content:i.content,replace:i.replace})"><option value="properties">.properties</option><option value="env">.env</option></select></label>
+  <label class="file-pick">Choose file<input type="file" accept=".properties,.env,.txt,text/plain" (change)="importFile($event)"></label></div>
+  <label>Contents<textarea rows="12" [value]="i.content" (input)="importer.set({format:i.format,content:$any($event.target).value,replace:i.replace})" spellcheck="false" placeholder="spring.datasource.url=jdbc:postgresql://db/app&#10;spring.datasource.password=…"></textarea></label>
+  <label class="check"><input type="checkbox" [checked]="i.replace" (change)="importer.set({format:i.format,content:i.content,replace:$any($event.target).checked})"> Delete keys in {{env()}} that are not in this file</label>
+  <div class="modal-actions"><button class="quiet" (click)="importer.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !i.content.trim()" (click)="runImport()">Import</button></div>
+</div>
+}
+
+@if(history(); as h){
+<div class="modal-backdrop" (click)="history.set(null)"></div>
+<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="history-title">
+  <h2 id="history-title">History · {{h.name}}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Version</th><th>Written</th><th>Size</th><th>Value</th><th></th></tr></thead>
+    <tbody>@for(v of h.versions; track v.version){
+      <tr><td>v{{v.version}}@if(v.current){ <span class="pill">current</span>}</td><td class="fine">{{v.createdAt*1000 | date:'MMM d, HH:mm'}} · {{who(v.createdBy)}}</td><td>{{size(v.size)}}</td>
+      <td class="value">@if(revealed()[h.name+'@'+v.version] !== undefined){<code class="secret">{{revealed()[h.name+'@'+v.version]}}</code>}@else{<button class="icon" (click)="viewVersion(v.version)">{{h.kind==='files'?'Download':'Reveal'}}</button>}</td>
+      <td class="actions">@if(!v.current){<button class="icon" [disabled]="busy()" (click)="rollback(v.version)">Restore</button>}</td></tr>
+    }</tbody>
+  </table></div>
+  <div class="modal-actions"><button class="quiet" (click)="history.set(null)">Close</button></div>
+</div>
+}
+
+@if(tokenForm(); as t){
+<div class="modal-backdrop" (click)="tokenForm.set(null)"></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="token-title">
+  <h2 id="token-title">Issue access token</h2>
+  <label>Name<input [value]="t.name" (input)="tokenForm.set({name:$any($event.target).value,environment:t.environment,expiresInDays:t.expiresInDays})" maxlength="80"><small>Where it is deployed, e.g. “billing prod (k8s)”.</small></label>
+  <label>Environment<select [value]="t.environment" (change)="tokenForm.set({name:t.name,environment:$any($event.target).value,expiresInDays:t.expiresInDays})">@for(e of selected()?.environments; track e){<option [value]="e" [selected]="e===t.environment">{{e}}</option>}</select></label>
+  <label>Expires<select (change)="tokenForm.set({name:t.name,environment:t.environment,expiresInDays:+$any($event.target).value})">@for(d of [[30,'30 days'],[90,'90 days'],[365,'1 year'],[0,'Never']]; track d[0]){<option [value]="d[0]" [selected]="d[0]===t.expiresInDays">{{d[1]}}</option>}</select></label>
+  <div class="modal-actions"><button class="quiet" (click)="tokenForm.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !t.name.trim()" (click)="createToken()">Issue token</button></div>
+</div>
+}
+
+@if(issued(); as t){
+<div class="modal-backdrop"></div>
+<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="issued-title">
+  <h2 id="issued-title">Token for {{t.app}} · {{t.environment}}</h2>
+  <div class="notice">Copy it now. Keystone stores only a hash and cannot show this token again.</div>
+  <div class="code-block"><button class="quiet copy" (click)="copy(t.token, 'Token copied')">Copy</button><pre><code>{{t.token}}</code></pre></div>
+  <p class="fine">Set it as <code>KEYSTONE_TOKEN</code> in the application's secret store or deployment environment, never in source control or browser code.</p>
+  <div class="modal-actions"><button class="primary" (click)="issued.set(null); chooseTab('integrate')">I've saved the token — show setup</button></div>
+</div>
+}
+
+@if(confirm(); as c){
+<div class="modal-backdrop" (click)="confirm.set(null)"></div>
+<div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">{{c.title}}</h2>
+  <p class="fine">{{c.message}}</p>
+  @if(c.expect){<label>Type <code>{{c.expect}}</code> to confirm<input [value]="c.typed" (input)="confirm.set({title:c.title,message:c.message,expect:c.expect,typed:$any($event.target).value,run:c.run})" autofocus></label>}
+  <div class="modal-actions"><button class="quiet" (click)="confirm.set(null)">Cancel</button><button class="primary danger-fill" [disabled]="busy() || (!!c.expect && c.typed!==c.expect)" (click)="confirmRun()">Delete</button></div>
+</div>
+}

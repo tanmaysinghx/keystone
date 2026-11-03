@@ -34,7 +34,8 @@ fn config() -> Config {
         service_key: SERVICE_KEY.into(),
         portal_url: "https://portal.test".into(),
         client_id: "keystone-test".into(),
-        monitors: vec![],
+        master_key: None,
+        trust_proxy: true,
     }
 }
 fn claims() -> Value {
@@ -115,10 +116,8 @@ async fn concurrent_retries_count_once_and_different_visitors_count_separately()
 async fn endpoints_enforce_service_and_admin_boundaries() {
     let app = router(test_state().await);
     for path in [
-        "/api/v1/admin/services",
-        "/api/v1/admin/overview",
-        "/api/v1/admin/posts",
         "/api/v1/auth/me",
+        "/api/v1/admin/vault/apps",
         "/api/v1/blog/stats?slug=test-post",
     ] {
         assert_eq!(
@@ -135,7 +134,7 @@ async fn endpoints_enforce_service_and_admin_boundaries() {
     assert_eq!(
         app.clone()
             .oneshot(
-                Request::get("/api/v1/admin/overview")
+                Request::get("/api/v1/auth/me")
                     .header("authorization", format!("Bearer {}", token(&ordinary)))
                     .body(Body::empty())
                     .unwrap()
@@ -147,7 +146,7 @@ async fn endpoints_enforce_service_and_admin_boundaries() {
     );
     let response = app
         .oneshot(
-            Request::get("/api/v1/admin/overview")
+            Request::get("/api/v1/auth/me")
                 .header("authorization", format!("Bearer {}", token(&claims())))
                 .body(Body::empty())
                 .unwrap(),
@@ -155,7 +154,7 @@ async fn endpoints_enforce_service_and_admin_boundaries() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body(response).await["likes"], 0);
+    assert_eq!(body(response).await["subject"], "test-admin");
 }
 #[test]
 fn jwt_rejects_wrong_issuer_audience_expiry_signature_and_id_token() {
@@ -231,7 +230,7 @@ async fn invalid_input_and_unconfigured_services_fail_closed() {
     cfg.client_id.clear();
     cfg.service_key.clear();
     let app = router(state(cfg).await.unwrap());
-    for path in ["/api/v1/admin/overview", "/api/v1/blog/stats?slug=test"] {
+    for path in ["/api/v1/auth/me", "/api/v1/blog/stats?slug=test"] {
         assert_eq!(
             app.clone()
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())

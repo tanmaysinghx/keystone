@@ -1,11 +1,6 @@
-use serde::Deserialize;
+use crate::crypto::MasterKey;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::env;
-
-#[derive(Clone, Deserialize)]
-pub struct Monitor {
-    pub name: String,
-    pub url: String,
-}
 
 #[derive(Clone)]
 pub struct Config {
@@ -15,7 +10,10 @@ pub struct Config {
     pub service_key: String,
     pub portal_url: String,
     pub client_id: String,
-    pub monitors: Vec<Monitor>,
+    /// Vault key-encryption key. Absent: the vault is sealed and every vault route returns 503.
+    pub master_key: Option<MasterKey>,
+    /// Behind a reverse proxy: take the client IP from its X-Forwarded-For.
+    pub trust_proxy: bool,
 }
 
 impl Config {
@@ -33,7 +31,11 @@ impl Config {
             service_key: value("KEYSTONE_SERVICE_KEY", ""),
             portal_url: value("PORTAL_URL", ""),
             client_id: value("PORTAL_CLIENT_ID", ""),
-            monitors: serde_json::from_str(&value("KEYSTONE_MONITORS_JSON", "[]"))?,
+            master_key: master_key(&value("KEYSTONE_MASTER_KEY", ""))?,
+            trust_proxy: matches!(
+                value("KEYSTONE_TRUST_PROXY", "false").as_str(),
+                "true" | "1"
+            ),
         };
         if !config.service_key.is_empty() && config.service_key.len() < 32 {
             anyhow::bail!("KEYSTONE_SERVICE_KEY must contain at least 32 characters");
@@ -43,17 +45,6 @@ impl Config {
             anyhow::ensure!(
                 !config.portal_url.ends_with('/'),
                 "PORTAL_URL must match the issuer exactly, without a trailing slash"
-            );
-        }
-        anyhow::ensure!(
-            config.monitors.len() <= 20,
-            "At most 20 monitors are supported"
-        );
-        for monitor in &config.monitors {
-            validate_url(&monitor.url)?;
-            anyhow::ensure!(
-                !monitor.name.is_empty() && monitor.name.len() <= 80,
-                "Invalid monitor name"
             );
         }
         Ok(config)
@@ -75,4 +66,21 @@ fn validate_url(raw: &str) -> anyhow::Result<()> {
         "URLs must not contain credentials or fragments"
     );
     Ok(())
+}
+
+/// `KEYSTONE_MASTER_KEY`: 32 random bytes, base64 (`openssl rand -base64 32`).
+pub fn master_key(raw: &str) -> anyhow::Result<Option<MasterKey>> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let bytes: [u8; 32] = STANDARD
+        .decode(raw.trim())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "KEYSTONE_MASTER_KEY must be 32 bytes, base64 encoded (openssl rand -base64 32)"
+            )
+        })?;
+    Ok(Some(MasterKey::from_bytes(bytes)))
 }

@@ -1,15 +1,20 @@
 pub mod admin;
 pub mod auth;
 pub mod blog;
+pub mod client;
 pub mod config;
+pub mod crypto;
 pub mod error;
+pub mod props;
 pub mod token;
+pub mod vault;
+pub mod vault_api;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
     http::{HeaderName, StatusCode},
     middleware,
-    routing::get,
+    routing::{get, post},
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -67,12 +72,80 @@ pub async fn state(config: config::Config) -> anyhow::Result<AppState> {
 pub fn router(state: AppState) -> Router {
     let admin = Router::new()
         .route("/api/v1/auth/me", get(admin::me))
-        .route("/api/v1/admin/services", get(admin::services))
-        .route("/api/v1/admin/overview", get(admin::overview))
-        .route("/api/v1/admin/posts", get(admin::posts))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
+        ));
+    let vault_admin = Router::new()
+        .route("/api/v1/admin/vault/status", get(vault::status))
+        .route("/api/v1/admin/vault/audit", get(vault::audit_log))
+        .route(
+            "/api/v1/admin/vault/apps",
+            get(vault::list_apps).post(vault::create_app),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}",
+            axum::routing::patch(vault::update_app).delete(vault::delete_app),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments",
+            post(vault::create_environment),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}",
+            axum::routing::delete(vault::delete_environment),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/items",
+            get(vault::list_items),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/import",
+            post(vault::import),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/config",
+            get(vault::preview_config),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/{kind}/{name}",
+            get(vault::get_item)
+                .put(vault::put_item)
+                .delete(vault::delete_item),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/{kind}/{name}/versions",
+            get(vault::versions),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/environments/{env}/{kind}/{name}/rollback",
+            post(vault::rollback),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/tokens",
+            get(vault::list_tokens).post(vault::create_token),
+        )
+        .route(
+            "/api/v1/admin/vault/apps/{app}/tokens/{id}",
+            axum::routing::delete(vault::revoke_token),
+        )
+        .layer(DefaultBodyLimit::max(vault::MAX_FILE * 2))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_admin,
+        ));
+    let vault_machine = Router::new()
+        .route("/api/v1/vault/whoami", get(vault_api::whoami))
+        .route("/api/v1/vault/config", get(vault_api::config))
+        .route("/api/v1/vault/{kind}/{name}", get(vault_api::item))
+        .route("/config/{application}/{profiles}", get(vault_api::spring))
+        .route(
+            "/config/{application}/{profiles}/{label}",
+            get(vault_api::spring),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            vault_api::require_token,
         ));
     let blog = Router::new()
         .route("/api/v1/blog/stats", get(blog::get_stats).post(blog::react))
@@ -83,10 +156,10 @@ pub fn router(state: AppState) -> Router {
     let static_files = ServeDir::new(&state.config.ui_dir).not_found_service(ServeFile::new(
         format!("{}/index.html", state.config.ui_dir),
     ));
-    Router::new().merge(admin).merge(blog)
+    Router::new().merge(admin).merge(vault_admin).merge(vault_machine).merge(blog)
         .route("/health/live", get(|| async { Json(json!({"status":"up"})) }))
         .route("/health/ready", get(ready))
-        .route("/api/v1/info", get(|| async {Json(json!({"name":"Keystone","version":env!("CARGO_PKG_VERSION"),"apiVersion":"v1"}))}))
+        .route("/api/v1/info", get(|| async {Json(json!({"name":"Keystone Vault","version":env!("CARGO_PKG_VERSION"),"apiVersion":"v1"}))}))
         .route("/api/v1/auth/config", get(auth_config))
         .route("/api/v1/auth/token", axum::routing::post(token::exchange))
         .route("/api/{*path}", get(not_found).post(not_found).put(not_found).delete(not_found))

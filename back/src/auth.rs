@@ -117,6 +117,12 @@ pub async fn require_admin(
         &state.config.portal_url,
         &state.config.client_id,
     )?;
+    let actor = crate::client::Actor::new(
+        crate::vault::admin_subject(&claims),
+        &request,
+        state.config.trust_proxy,
+    );
+    request.extensions_mut().insert(actor);
     request.extensions_mut().insert(claims);
     Ok(next.run(request).await)
 }

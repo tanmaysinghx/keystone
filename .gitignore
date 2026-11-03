@@ -11,3 +11,4 @@
 /data/
 /packages/portal-sso/dist/
 *.log
+examples/spring-boot/target/

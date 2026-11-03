@@ -5,8 +5,8 @@
 <h1 align="center">Keystone</h1>
 
 <p align="center">
-  <strong>Shared portfolio services with a Portal SSO-protected admin console.</strong><br />
-  Rust backend. Angular dashboard. One workspace for service health and blog activity.
+  <strong>Secrets and configuration vault for the Portal suite, with a Portal SSO-protected admin console.</strong><br />
+  Rust backend. Angular dashboard. Encrypted keys and whole config files that apps load at startup, plus service health.
 </p>
 
 <p align="center">
@@ -20,6 +20,9 @@
 
 ## What you get
 
+- **Keystone Vault:** per-application encrypted secrets, stored as individual keys or as whole files (`.properties`, YAML, JSON, certificates). Includes `default`-inherited environments, version history with rollback, `.properties`/`.env` import and export, and a mandatory audit trail. See [docs/VAULT.md](docs/VAULT.md).
+- **Startup loading for every app:** a Spring Cloud Config-compatible endpoint (Spring Boot apps such as Portal need no custom code), plus JSON, `.properties`, dotenv and shell formats. Each app authenticates with a read-only token scoped to one environment.
+- **Portal-native:** vault application ids are Portal `client_id`s, administrators sign in with Portal SSO, and Portal's App Connect recognizes the `keystone` product.
 - **Admin console:** a Portal-style workspace with emerald accents, service navigation, and an account panel.
 - **Portal SSO:** popup sign-in with PKCE and session refresh; every admin API requires a verified access token and the administrator role.
 - **Live service checks:** API, database, Portal connectivity, and configured service monitors, refreshed every 15 seconds while the dashboard is visible.
@@ -66,12 +69,14 @@ The server reads `.env` in its working directory. `.env.example` lists setting n
 | `KEYSTONE_DATABASE_URL` | `sqlite://data/keystone.db`; migrations run at startup |
 | `KEYSTONE_UI_DIR` | `ui/dist/keystone-ui/browser` |
 | `KEYSTONE_SERVICE_KEY` | At least 32 characters; required for server-to-server blog API access |
+| `KEYSTONE_MASTER_KEY` | 32 bytes, base64 (`openssl rand -base64 32`). Wraps each vault application's data key. Unset: the vault is sealed. **Back it up separately from the database**; it cannot be recovered |
+| `KEYSTONE_TRUST_PROXY` | `false`. Set `true` only behind a reverse proxy, so audit records the client IP from `X-Forwarded-For` instead of the proxy's |
 | `PORTAL_URL` | Exact verified issuer, no trailing slash |
 | `PORTAL_CLIENT_ID` | Registered **public** OAuth client ID |
 | `KEYSTONE_MONITORS_JSON` | Optional JSON array of `{ "name": "Service name", "url": "https://service.example/health" }`; at most 20 |
 | `RUST_LOG` | Rust log filter; defaults to Keystone + request tracing |
 
-Missing SSO settings leave all admin routes locked. Missing the service key leaves blog routes locked. Health checks still work. Monitors come only from trusted deployment configuration; dashboard users cannot submit arbitrary URLs. Remote URLs require HTTPS, redirects are not followed, and each check has a 3-second timeout. HTTP is permitted for loopback development.
+Missing SSO settings leave all admin routes locked. Missing the service key leaves blog routes locked. A missing master key leaves the vault sealed. Health checks still work. Monitors come only from trusted deployment configuration; dashboard users cannot submit arbitrary URLs. Remote URLs require HTTPS, redirects are not followed, and each check has a 3-second timeout. HTTP is permitted for loopback development.
 
 ## Portal SSO
 
@@ -131,4 +136,4 @@ This initial version uses one SQLite database with WAL and migrations; run one b
 
 The admin console polls every 15 seconds while visible. Failed refreshes explicitly mark old health results **Unknown**, rather than claiming services are still healthy. Built-in checks cover the API, storage, reactions, and Portal discovery; add other service health endpoints to the monitor configuration. Only services actually configured and checked appear.
 
-Expose the server through HTTPS with request/rate limits and a durable volume. API bodies are limited to 16 KiB; the portfolio gateway limits requests to 2 KiB. Secrets and bearer tokens are not logged. Portal role changes take effect when a new token is issued or an old token expires; no immediate revocation/introspection workflow is implemented in this first version.
+Expose the server through HTTPS with request/rate limits and a durable volume. API bodies are limited to 16 KiB (1 MiB on vault admin routes, for file uploads); the portfolio gateway limits requests to 2 KiB. Secrets and bearer tokens are not logged. Portal role changes take effect when a new token is issued or an old token expires; no immediate revocation/introspection workflow is implemented in this first version.

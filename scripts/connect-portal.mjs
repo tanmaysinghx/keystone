@@ -38,7 +38,7 @@ let expiry;
 try {
   const discovery=await fetch(`${issuer}/.well-known/openid-configuration`,{signal:AbortSignal.timeout(10000),redirect:'error'}).then(r=>r.json());
   if(discovery.issuer!==issuer)throw Error('Issuer mismatch');
-  const response=await fetch(`${issuer}/api/external/connect/requests`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({manifest:{product:'keystone',name:'Keystone',description:'Admin-only Rust and Angular service console; portfolio blog reactions.',appUrl,clientId:'keystone',redirectUris:[appUrl],scopes:['openid','profile','email'],confidential:false,externalAuth:false,externalRegistration:false},callbackUri:`${appUrl}/api/setup/portal-callback`,codeChallenge:challenge,codeChallengeMethod:'S256'}),signal:AbortSignal.timeout(10000),redirect:'error'});
+  const response=await fetch(`${issuer}/api/external/connect/requests`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({manifest:{product:'keystone',name:'Keystone',description:'Keystone Vault: encrypted secrets and configuration for Portal applications, plus service health.',appUrl,clientId:'keystone',redirectUris:[appUrl],scopes:['openid','profile','email'],confidential:false,externalAuth:false,externalRegistration:false},callbackUri:`${appUrl}/api/setup/portal-callback`,codeChallenge:challenge,codeChallengeMethod:'S256'}),signal:AbortSignal.timeout(10000),redirect:'error'});
   if(!response.ok)throw Error(`Portal connection request returned HTTP ${response.status}`);
   const result=await response.json();requestId=result.requestId;
   if(!requestId || new URL(result.approvalUrl).origin!==issuer)throw Error('Unexpected approval response');
