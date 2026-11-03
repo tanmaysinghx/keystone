@@ -25,14 +25,14 @@ jobs:
     name: Console
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - run: npm --prefix ui ci && npm --prefix ui run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-console
           path: ui/dist/
@@ -55,8 +55,8 @@ jobs:
           - { os: macos-15-intel, target: x86_64-apple-darwin, asset: macos-x86_64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-x86_64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-console
           path: ui/dist/
@@ -84,7 +84,7 @@ jobs:
             tar -czf "$name" -C "$dir" keystone README.md LICENSE keystone.properties.example
             if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.asset }}
           path: keystone-${{ matrix.asset }}.*
@@ -94,17 +94,17 @@ jobs:
     name: Container image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: name
         run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -125,14 +125,14 @@ jobs:
     needs: [binaries, image]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*-*
           path: dist/
           merge-multiple: true
       - run: ls -la dist/ && cat dist/*.sha256 > dist/SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ inputs.version }}
           name: Keystone Vault v${{ inputs.version }}
