@@ -1,0 +1,60 @@
+<section class="page-heading">
+  <div><h1>Audit log</h1><p class="lede">Every secret pull, reveal and change across all applications, with who did it, when, and from which IP address.</p></div>
+  <button class="quiet" [disabled]="busy()" (click)="exportCsv()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-4-4 4 4 4-4M5 20h14"/></svg>Export CSV</button>
+</section>
+
+@if(error()){<div class="notice error" role="alert">{{error()}}</div>}
+
+<section class="stats" aria-label="Last 24 hours">
+  <div><strong>{{summary()?.pulls ?? '—'}}</strong><span>Secret pulls</span><small>last 24 hours</small></div>
+  <button class="stat" [class.warn]="(summary()?.denied ?? 0) > 0" (click)="showRefused()" [disabled]="!summary()?.denied">
+    <strong>{{summary()?.denied ?? '—'}}</strong><span>Refused tokens</span><small>{{(summary()?.denied ?? 0) > 0 ? 'worth a look →' : 'last 24 hours'}}</small>
+  </button>
+  <div><strong>{{summary()?.changes ?? '—'}}</strong><span>Changes</span><small>writes, deletes, rollbacks</small></div>
+  <div><strong>{{summary()?.distinctIps ?? '—'}}</strong><span>Source IPs</span><small>{{summary()?.activeTokens ?? 0}} tokens in use</small></div>
+</section>
+
+<div class="filters">
+  <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input aria-label="Search the audit log" placeholder="Search who, IP, key, client…" [value]="q()" (input)="setQuery($any($event.target).value)"></label>
+  <select aria-label="Application" [value]="app()" (change)="setApp($any($event.target).value)">
+    <option value="">All applications</option>
+    @for(a of store.apps(); track a.id){<option [value]="a.id" [selected]="a.id===app()">{{a.name}}</option>}
+  </select>
+  <div class="segmented" role="group" aria-label="Time range">@for(r of ranges; track r){<button [class.active]="range()===r" (click)="setRange(r)">{{r === 'all' ? 'All' : r}}</button>}</div>
+</div>
+<div class="kinds" role="tablist" aria-label="Event type">
+  @for(k of kinds; track k[0]){<button role="tab" [class.active]="kind()===k[0]" [attr.aria-selected]="kind()===k[0]" (click)="setKind(k[0])">{{k[1]}}</button>}
+</div>
+
+@if(items().length){
+<div class="table-wrap"><table class="log">
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>From</th></tr></thead>
+  <tbody>
+  @for(e of items(); track e.id){
+    <tr [class.denied]="tone(e.event)==='denied'" (click)="expanded.set(expanded()===e.id ? null : e.id)" class="row">
+      <td class="when"><span>{{e.createdAt*1000 | date:'MMM d, HH:mm:ss'}}</span></td>
+      <td><span class="who">@if(isApp(e.subject)){<span class="tag app">app</span>}@else{<span class="tag admin">admin</span>}{{who(e.subject)}}</span></td>
+      <td><span class="event" [attr.data-tone]="tone(e.event)"><span class="dot"></span>{{label(e.event)}}</span></td>
+      <td><code class="target">{{e.target}}</code></td>
+      <td class="from"><code>{{e.ip || '—'}}</code><small>{{client(e.userAgent)}}</small></td>
+    </tr>
+    @if(expanded()===e.id){
+      <tr class="detail"><td colspan="5">
+        <dl>
+          <div><dt>Time</dt><dd>{{e.createdAt*1000 | date:'full'}}</dd></div>
+          <div><dt>Subject</dt><dd><code>{{e.subject}}</code></dd></div>
+          <div><dt>Event</dt><dd><code>{{e.event}}</code></dd></div>
+          <div><dt>Target</dt><dd><code>{{e.target}}</code></dd></div>
+          <div><dt>IP address</dt><dd><code>{{e.ip || 'not recorded'}}</code></dd></div>
+          <div><dt>User-Agent</dt><dd><code>{{e.userAgent || 'not recorded'}}</code></dd></div>
+        </dl>
+      </td></tr>
+    }
+  }
+  </tbody>
+</table></div>
+@if(next() !== null){<div class="more"><button class="quiet" [disabled]="busy()" (click)="more()">{{busy() ? 'Loading…' : 'Load older events'}}</button></div>}
+} @else if(loaded()) {
+  <div class="blank"><h3>No events match</h3><p>Try a longer time range, another event type, or clear the search.</p></div>
+}
+<p class="fine footnote">Events are written before each response and cannot be edited from the console. Behind a reverse proxy, set <code>KEYSTONE_TRUST_PROXY=true</code> so the client's IP is recorded instead of the proxy's.</p>

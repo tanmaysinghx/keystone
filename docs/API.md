@@ -9,9 +9,6 @@ All JSON responses use `Cache-Control: no-store`. Request responses carry `X-Req
 | GET | `/api/v1/info` | None | Name, version and API version |
 | GET | `/api/v1/auth/config` | None | Public issuer/client/scopes and configured flag |
 | GET | `/api/v1/auth/me` | Portal access token + `ROLE_ADMIN` | Verified profile and expiry |
-| GET | `/api/v1/admin/services` | Portal access token + `ROLE_ADMIN` | Live dependency checks and timestamps |
-| GET | `/api/v1/admin/overview` | Portal access token + `ROLE_ADMIN` | Total likes/views/posts, uptime and version |
-| GET | `/api/v1/admin/posts?page=0` | Portal access token + `ROLE_ADMIN` | 50 post summaries per page |
 | GET | `/api/v1/blog/stats?slug=example` | `X-Keystone-Key` | Read counts |
 | POST | `/api/v1/blog/stats` | `X-Keystone-Key` | Idempotent like or daily view |
 | * | `/api/v1/admin/vault/**` | Portal access token + `ROLE_ADMIN` | Manage vault applications, environments, keys, files, versions and tokens |
@@ -34,19 +31,6 @@ The portfolio server supplies a visitor UUID from its HttpOnly cookie:
 ```
 
 Do not call this backend endpoint directly from browser code or expose its shared key. The existing portfolio `/api/stats` gateway remains the browser-facing endpoint. There is no public admin registration, password login, arbitrary-URL probe, or destructive counter endpoint.
-
-## Service status contract
-
-```json
-{
-  "checkedAt": 1793380000,
-  "services": [
-    { "name": "Keystone API", "status": "up", "detail": "Serving requests", "latencyMs": 0 }
-  ]
-}
-```
-
-`status` is `up`, `down`, or `unconfigured`. External checks require a successful HTTP status; Portal additionally verifies the discovery issuer. A 200 health endpoint is not proof that every operation within a remote service works. External checks run concurrently and have bounded timeouts. The UI shows stale results as Unknown on refresh failure.
 
 ## Browser token transport
 

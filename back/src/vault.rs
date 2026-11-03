@@ -1269,8 +1269,18 @@ pub async fn revoke_token(
 #[derive(Deserialize)]
 pub struct AuditQuery {
     pub app: Option<String>,
-    /// `pulls`: only reads of secrets by applications and reveals by administrators.
+    /// `pulls` (app reads, admin reveals, refused tokens), `changes`, `denied` or `tokens`.
     pub kind: Option<String>,
+    /// Free text matched against who, target, IP and User-Agent.
+    pub q: Option<String>,
+    /// Unix seconds, inclusive.
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+    /// Keyset cursor: return events older than this id.
+    pub before: Option<i64>,
+    pub limit: Option<i64>,
+    /// `csv` downloads the matching events (up to 10,000).
+    pub format: Option<String>,
 }
 
 type AuditRow = (
@@ -1283,25 +1293,195 @@ type AuditRow = (
     i64,
 );
 
+const PULL_EVENTS: &str =
+    "(event LIKE '%.read' OR event LIKE '%.reveal' OR event = 'vault.token.denied')";
+const CHANGE_EVENTS: &str = "(event LIKE '%.write' OR event LIKE '%.delete' OR event LIKE '%.create' OR event LIKE '%.update' OR event LIKE '%.rollback' OR event = 'vault.import' OR event = 'vault.token.revoke')";
+
+/// One filter shared by the list, the CSV export and the summary. Binds: ?1 app, ?2 kind, ?3 q,
+/// ?4 from, ?5 to.
+fn audit_filter() -> String {
+    format!(
+        "event LIKE 'vault.%'
+         AND (?1 IS NULL OR target = ?1 OR target LIKE ?1 || '/%' OR target LIKE ?1 || ' %')
+         AND (?2 IS NULL
+              OR (?2 = 'pulls' AND {PULL_EVENTS})
+              OR (?2 = 'changes' AND {CHANGE_EVENTS})
+              OR (?2 = 'denied' AND event = 'vault.token.denied')
+              OR (?2 = 'tokens' AND event LIKE 'vault.token.%'))
+         AND (?3 IS NULL OR instr(lower(subject || ' ' || COALESCE(target, '') || ' ' || COALESCE(ip, '') || ' ' || COALESCE(user_agent, '')), lower(?3)) > 0)
+         AND (?4 IS NULL OR created_at >= ?4)
+         AND (?5 IS NULL OR created_at <= ?5)"
+    )
+}
+
+fn csv_field(value: &str) -> String {
+    // Leading =, +, - or @ would run as a formula in a spreadsheet.
+    let value = if value.starts_with(['=', '+', '-', '@']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    };
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 pub async fn audit_log(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Response, ApiError> {
+    let app = query.app.filter(|a| !a.is_empty());
+    if app.as_deref().is_some_and(|a| !valid_app_id(a)) {
+        return Err(bad("invalid_app", "Unknown application filter"));
+    }
+    let kind = query.kind.filter(|k| !k.is_empty() && k != "all");
+    if kind
+        .as_deref()
+        .is_some_and(|k| !matches!(k, "pulls" | "changes" | "denied" | "tokens"))
+    {
+        return Err(bad(
+            "invalid_kind",
+            "Use kind pulls, changes, denied or tokens",
+        ));
+    }
+    let q = query
+        .q
+        .map(|q| q.trim().chars().take(100).collect::<String>())
+        .filter(|q| !q.is_empty());
+    let csv = query.format.as_deref() == Some("csv");
+    let limit = if csv {
+        10_000
+    } else {
+        query.limit.unwrap_or(100).clamp(1, 500)
+    };
+    let sql = format!(
+        "SELECT id, subject, event, target, ip, user_agent, created_at FROM audit_events
+         WHERE {} AND (?6 IS NULL OR id < ?6) ORDER BY id DESC LIMIT ?7",
+        audit_filter()
+    );
+    let rows: Vec<AuditRow> = sqlx::query_as(&sql)
+        .bind(&app)
+        .bind(&kind)
+        .bind(&q)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(query.before)
+        .bind(limit + 1)
+        .fetch_all(&state.db)
+        .await?;
+    if csv {
+        audit(
+            &state.db,
+            &actor,
+            "vault.audit.export",
+            app.as_deref().unwrap_or("all applications"),
+        )
+        .await?;
+        let mut out = String::from("time_utc,who,action,target,ip,user_agent\n");
+        for (_, subject, event, target, ip, user_agent, at) in rows.iter().take(limit as usize) {
+            let time = chrono_like(*at);
+            out.push_str(
+                &[
+                    time,
+                    subject.clone(),
+                    event.clone(),
+                    target.clone().unwrap_or_default(),
+                    ip.clone().unwrap_or_default(),
+                    user_agent.clone().unwrap_or_default(),
+                ]
+                .iter()
+                .map(|v| csv_field(v))
+                .collect::<Vec<_>>()
+                .join(","),
+            );
+            out.push('\n');
+        }
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"keystone-vault-audit.csv\"",
+                ),
+            ],
+            out,
+        )
+            .into_response());
+    }
+    let more = rows.len() as i64 > limit;
+    let items: Vec<Value> = rows
+        .iter()
+        .take(limit as usize)
+        .map(|(id, subject, event, target, ip, user_agent, at)| {
+            json!({
+                "id": id, "subject": subject, "event": event, "target": target,
+                "ip": ip, "userAgent": user_agent, "createdAt": at,
+            })
+        })
+        .collect();
+    let next = if more {
+        items.last().and_then(|e| e["id"].as_i64())
+    } else {
+        None
+    };
+    Ok(Json(json!({"items": items, "nextBefore": next})).into_response())
+}
+
+/// `2026-11-03T16:22:51Z` without a date-time dependency.
+fn chrono_like(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
+}
+
+/// Last-24-hour totals for the audit screen.
+pub async fn audit_summary(
     State(state): State<AppState>,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let pulls = query.kind.as_deref() == Some("pulls");
-    let rows: Vec<AuditRow> = sqlx::query_as(
-        "SELECT id, subject, event, target, ip, user_agent, created_at FROM audit_events
-         WHERE event LIKE 'vault.%' AND (?1 IS NULL OR target = ?1 OR target LIKE ?1 || '/%' OR target LIKE ?1 || ' %')
-           AND (?2 = 0 OR event LIKE '%.read' OR event LIKE '%.reveal' OR event = 'vault.token.denied')
-         ORDER BY id DESC LIMIT 500",
-    )
-    .bind(query.app.filter(|a| !a.is_empty()))
-    .bind(pulls)
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(
-        json!({"items": rows.into_iter().map(|(id, subject, event, target, ip, user_agent, at)| json!({
-        "id": id, "subject": subject, "event": event, "target": target,
-        "ip": ip, "userAgent": user_agent, "createdAt": at,
-    })).collect::<Vec<_>>()}),
+    let app = query.app.filter(|a| !a.is_empty() && valid_app_id(a));
+    let since = crate::now() as i64 - 86_400;
+    let (pulls, denied, changes, ips, apps): (i64, i64, i64, i64, i64) = sqlx::query_as(&format!(
+        "SELECT COALESCE(SUM({PULL_EVENTS} AND event != 'vault.token.denied'), 0),
+                COALESCE(SUM(event = 'vault.token.denied'), 0),
+                COALESCE(SUM({CHANGE_EVENTS}), 0),
+                COUNT(DISTINCT ip),
+                COUNT(DISTINCT CASE WHEN subject LIKE 'token:%' THEN subject END)
+         FROM audit_events
+         WHERE event LIKE 'vault.%' AND created_at >= ?2
+           AND (?1 IS NULL OR target = ?1 OR target LIKE ?1 || '/%' OR target LIKE ?1 || ' %')"
     ))
+    .bind(&app)
+    .bind(since)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "since": since, "pulls": pulls, "denied": denied, "changes": changes,
+        "distinctIps": ips, "activeTokens": apps,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn audit_time_format() {
+        assert_eq!(super::chrono_like(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::chrono_like(1_793_725_371), "2026-11-03T17:02:51Z");
+        assert_eq!(super::csv_field("=cmd()"), "\"'=cmd()\"");
+        assert_eq!(super::csv_field("a\"b"), "\"a\"\"b\"");
+    }
 }

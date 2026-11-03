@@ -31,7 +31,7 @@ describe('vault workspace',()=>{
     TestBed.configureTestingModule({imports:[VaultComponent],providers:[{provide:Api,useValue:fake({status:{...status,sealed:true},apps:[]})}]});
     const fixture=TestBed.createComponent(VaultComponent);fixture.detectChanges();await fixture.componentInstance.load();fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('The vault is sealed');
-    expect((fixture.nativeElement.querySelector('.page-heading .primary') as HTMLButtonElement).disabled).toBe(true);
+    expect(fixture.nativeElement.querySelector('.blank.hero')).toBeNull();
   });
   it('requires typing the application id before deleting it',async()=>{
     const api=fake();

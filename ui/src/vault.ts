@@ -1,7 +1,8 @@
-import { Component, OnInit, computed, inject, input, signal } from '@angular/core';
+import { Component, HostListener, OnInit, computed, effect, inject, input, signal, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { Api, AuditEvent, IssuedToken, VaultApp, VaultItem, VaultStatus, VaultToken, VaultVersion } from './api';
+import { VaultStore } from './vault-store';
 
 type Tab = 'keys' | 'files' | 'tokens' | 'integrate' | 'activity';
 interface Editor { name: string; value: string; isNew: boolean }
@@ -19,12 +20,15 @@ export class VaultComponent implements OnInit {
   private api = inject(Api);
   readonly portalUrl = input('');
 
-  readonly status = signal<VaultStatus | null>(null);
-  readonly apps = signal<VaultApp[]>([]);
-  readonly selectedId = signal<string | null>(null);
-  readonly env = signal('default');
+  readonly store = inject(VaultStore);
+  readonly status = this.store.status;
+  readonly apps = this.store.apps;
+  readonly selectedId = this.store.selectedId;
+  readonly env = this.store.env;
+  /** Open dropdown: 'app' (header overflow), 'env-add', or a row key. */
+  readonly menu = signal<string | null>(null);
   readonly tab = signal<Tab>('keys');
-  readonly items = signal<VaultItem[]>([]);
+  readonly items = this.store.items;
   readonly tokens = signal<VaultToken[]>([]);
   readonly audit = signal<AuditEvent[]>([]);
   readonly pullsOnly = signal(true);
@@ -46,11 +50,26 @@ export class VaultComponent implements OnInit {
   readonly snippet = signal<'spring' | 'node' | 'shell' | 'file'>('spring');
 
   readonly selected = computed(() => this.apps().find(a => a.id === this.selectedId()) ?? null);
+  readonly keyCount = computed(() => this.items().filter(i => i.kind === 'key').length);
+  readonly fileCount = computed(() => this.items().filter(i => i.kind === 'file').length);
+  readonly activeTokens = computed(() => this.tokens().filter(t => t.active).length);
   readonly keys = computed(() => this.items().filter(i => i.kind === 'key' && i.name.toLowerCase().includes(this.filter().trim().toLowerCase())));
   readonly files = computed(() => this.items().filter(i => i.kind === 'file' && i.name.toLowerCase().includes(this.filter().trim().toLowerCase())));
   readonly origin = typeof location === 'undefined' ? 'https://keystone.example' : location.origin;
 
+  constructor() {
+    effect(() => {
+      const r = this.store.requestedApp(); if (!r) return;
+      untracked(async () => {
+        if (r.id !== this.selectedId() || (r.env && r.env !== this.env())) await this.select(r.id, r.env ?? 'default');
+        if (r.item) { this.tab.set(r.item.kind === 'key' ? 'keys' : 'files'); this.filter.set(r.item.name); }
+      });
+    });
+    effect(() => { if (this.store.newAppRequests() > 0) untracked(() => this.openNewApp()); });
+  }
   async ngOnInit(): Promise<void> { await this.load(); }
+  @HostListener('document:click') closeMenus(): void { this.menu.set(null); }
+  toggleMenu(name: string, event: Event): void { event.stopPropagation(); this.menu.set(this.menu() === name ? null : name); }
 
   private path(...parts: string[]): string {
     return `${BASE}/apps/${enc(this.selectedId() ?? '')}${parts.length ? '/' + parts.join('/') : ''}`;
@@ -84,7 +103,7 @@ export class VaultComponent implements OnInit {
   private async loadTab(): Promise<void> {
     if (!this.selectedId()) return;
     const tab = this.tab();
-    if (tab === 'keys' || tab === 'files') this.items.set((await this.api.get<{ items: VaultItem[] }>(this.envPath('items'))).items);
+    this.items.set((await this.api.get<{ items: VaultItem[] }>(this.envPath('items'))).items);
     if (tab === 'tokens' || tab === 'integrate') this.tokens.set((await this.api.get<{ items: VaultToken[] }>(this.path('tokens'))).items);
     if (tab === 'activity') this.audit.set((await this.api.get<{ items: AuditEvent[] }>(`${BASE}/audit?app=${enc(this.selectedId()!)}${this.pullsOnly() ? '&kind=pulls' : ''}`)).items);
   }
@@ -119,7 +138,7 @@ export class VaultComponent implements OnInit {
     const name = this.newEnv().trim().toLowerCase(); if (!name) return;
     await this.run(async () => {
       await this.api.send('POST', this.path('environments'), { name });
-      this.newEnv.set(''); await this.refreshApps(); await this.chooseEnv(name);
+      this.newEnv.set(''); this.menu.set(null); await this.refreshApps(); await this.chooseEnv(name);
     });
   }
   askDeleteEnv(): void {

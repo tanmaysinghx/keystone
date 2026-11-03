@@ -132,7 +132,8 @@ Prefix: `/api/v1/admin/vault`.
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | GET | `/status` | Sealed flag and totals |
-| GET | `/audit?app=&kind=pulls` | Last 500 vault events with IP and User-Agent; `kind=pulls` keeps only reads, reveals and refused tokens |
+| GET | `/audit/summary?app=` | Last-24-hour totals: pulls, refused tokens, changes, distinct IPs |
+| GET | `/audit?app=&kind=pulls` | Vault events with IP and User-Agent, newest first. Filters: `kind=pulls|changes|denied|tokens`, `q=` (who, target, IP, client), `from=`/`to=` (unix seconds); paging with `limit=` (at most 500) and `before=` (the `nextBefore` cursor); `format=csv` exports up to 10,000 events and is itself audited |
 | GET, POST | `/apps` | List; create `{id, name, description?, portalClientId?, environments?}` |
 | PATCH, DELETE | `/apps/{app}` | Update `{name, description, portalClientId}`; delete needs `?confirm={app}` |
 | POST | `/apps/{app}/environments` | `{name}` |

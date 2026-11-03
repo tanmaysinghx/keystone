@@ -1,0 +1,83 @@
+<ng-template #inline let-text>
+  @for(seg of segments(text); track $index){
+    @switch(seg.kind){
+      @case('code'){<code class="inline-code">{{seg.text}}</code>}
+      @case('bold'){<strong>{{seg.text}}</strong>}
+      @case('link'){<a [href]="'/docs/'+seg.guide" (click)="open(seg.guide!, $event)">{{seg.text}}</a>}
+      @default{{{seg.text}}}
+    }
+  }
+</ng-template>
+
+<div class="docs">
+  <header class="docs-header">
+    <div class="docs-bar">
+      <a class="docs-brand" href="/docs" (click)="open('introduction', $event)"><img src="/logo.svg" width="32" height="32" alt="Keystone">Keystone Vault<span class="tag">Docs</span></a>
+      <nav class="docs-actions">
+        <button class="docs-menu" (click)="menuOpen.set(!menuOpen())" [attr.aria-expanded]="menuOpen()">Guides</button>
+        <a class="open-console" href="/">Open console</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="docs-body">
+    <aside class="docs-nav" [class.open]="menuOpen()">
+      <nav aria-label="Guides">
+        @for(g of groups; track g.group){
+          <div class="docs-group">
+            <p>{{g.group}}</p>
+            @for(item of g.guides; track item.id){
+              <a [href]="'/docs/'+item.id" (click)="open(item.id, $event)" [class.active]="item.id===guide().id" [attr.aria-current]="item.id===guide().id?'page':null">{{item.title}}</a>
+            }
+          </div>
+        }
+      </nav>
+    </aside>
+
+    <main class="docs-main">
+      <article>
+        <p class="docs-eyebrow">{{guide().group}}</p>
+        <h1>{{guide().title}}</h1>
+        <p class="docs-summary">{{guide().summary}}</p>
+
+        @for(block of guide().blocks; track $index){
+          @switch(block.kind){
+            @case('p'){<p class="docs-p"><ng-container *ngTemplateOutlet="inline; context:{$implicit:$any(block).text}" /></p>}
+            @case('h'){<h2>{{$any(block).text}}</h2>}
+            @case('list'){<ul class="docs-list">@for(item of $any(block).items; track $index){<li><ng-container *ngTemplateOutlet="inline; context:{$implicit:item}" /></li>}</ul>}
+            @case('steps'){
+              <ol class="docs-steps">@for(step of $any(block).items; track $index){
+                <li><span class="num">{{$index+1}}</span><div><h3>{{step.title}}</h3><p><ng-container *ngTemplateOutlet="inline; context:{$implicit:step.body}" /></p></div></li>
+              }</ol>
+            }
+            @case('code'){
+              <div class="docs-code"><div class="code-head"><span>{{$any(block).label}}</span><button (click)="copy($any(block).code, 'c'+$index)">{{copied()==='c'+$index?'Copied':'Copy'}}</button></div><pre><code>{{code($any(block).code)}}</code></pre></div>
+            }
+            @case('table'){
+              <div class="docs-table"><table><thead><tr>@for(h of $any(block).head; track $index){<th>{{h}}</th>}</tr></thead>
+                <tbody>@for(row of $any(block).rows; track $index){<tr>@for(cell of row; track $index){<td><ng-container *ngTemplateOutlet="inline; context:{$implicit:cell}" /></td>}</tr>}</tbody></table></div>
+            }
+            @case('note'){<div class="docs-note" [class.warn]="$any(block).tone==='warn'"><strong>{{$any(block).tone==='warn'?'Important':'Tip'}}</strong><span><ng-container *ngTemplateOutlet="inline; context:{$implicit:$any(block).text}" /></span></div>}
+            @case('links'){<div class="docs-links">@for(l of $any(block).items; track l.guide){<a [href]="'/docs/'+l.guide" (click)="open(l.guide, $event)">{{l.text}} <span>→</span></a>}</div>}
+            @case('stacks'){
+              <div class="docs-stacks">
+                <div class="stack-tabs" role="tablist">@for(s of stacks; track s.id){<button role="tab" [attr.aria-selected]="s.id===activeStack()" [class.active]="s.id===activeStack()" (click)="activeStack.set(s.id)">{{s.label}}</button>}</div>
+                <div class="docs-code flush"><div class="code-head"><span>{{stack().caption}}</span><button (click)="copy(stack().code, 'stack')">{{copied()==='stack'?'Copied':'Copy'}}</button></div><pre><code>{{code(stack().code)}}</code></pre></div>
+              </div>
+            }
+            @case('endpoints'){
+              <div class="docs-table"><table><thead><tr><th>Method</th><th>Path</th><th>Purpose</th><th>Auth</th></tr></thead>
+                <tbody>@for(e of endpoints; track e.method+e.path){<tr><td><span class="method" [attr.data-method]="e.method">{{e.method}}</span></td><td><code class="path">{{e.path}}</code></td><td>{{e.summary}}</td><td><span class="auth" [attr.data-auth]="e.auth">{{e.auth}}</span></td></tr>}</tbody></table></div>
+            }
+          }
+        }
+
+        <nav class="docs-pager" aria-label="Guide navigation">
+          @if(previous(); as p){<a class="prev" [href]="'/docs/'+p.id" (click)="open(p.id, $event)"><small>Previous</small>{{p.title}}</a>}@else{<span></span>}
+          @if(next(); as n){<a class="next" [href]="'/docs/'+n.id" (click)="open(n.id, $event)"><small>Next</small>{{n.title}}</a>}
+        </nav>
+      </article>
+      <footer class="docs-footer"><span>Keystone Vault v{{version()}} · part of the Portal SSO suite</span><a href="/">Open console →</a></footer>
+    </main>
+  </div>
+</div>

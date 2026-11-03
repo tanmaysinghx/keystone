@@ -80,6 +80,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/admin/vault/status", get(vault::status))
         .route("/api/v1/admin/vault/audit", get(vault::audit_log))
         .route(
+            "/api/v1/admin/vault/audit/summary",
+            get(vault::audit_summary),
+        )
+        .route(
             "/api/v1/admin/vault/apps",
             get(vault::list_apps).post(vault::create_app),
         )

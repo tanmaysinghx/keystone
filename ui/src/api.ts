@@ -4,9 +4,6 @@ import { firstValueFrom, from, timeout } from 'rxjs';
 import { PortalSSO } from '@tanmaysinghx/portal-sso';
 export interface AuthConfig { configured:boolean; portalUrl:string; clientId:string; scope:string }
 export interface Admin {subject:string; name:string|null; email:string|null; roles:string[]; expiresAt:number}
-export interface Service {name:string;status:'up'|'down'|'unconfigured';detail:string;latencyMs:number}
-export interface Health {checkedAt:number;services:Service[]}
-export interface Overview {likes:number;views:number;posts:number;uptimeSeconds:number;version:string}
 export interface VaultStatus {sealed:boolean;apps:number;keys:number;files:number;activeTokens:number;portalUrl:string}
 export interface VaultApp {id:string;name:string;description:string;portalClientId:string|null;createdAt:number;updatedAt:number;environments:string[];keyCount:number;fileCount:number;activeTokens:number}
 export interface VaultItem {kind:'key'|'file';name:string;version:number;contentType:string;size:number;updatedBy:string;updatedAt:number}
@@ -14,7 +11,6 @@ export interface VaultVersion {version:number;size:number;createdBy:string;creat
 export interface VaultToken {id:string;name:string;environment:string;createdBy:string;createdAt:number;expiresAt:number|null;lastUsedAt:number|null;revokedAt:number|null;active:boolean}
 export interface IssuedToken {id:string;token:string;app:string;environment:string;expiresAt:number|null}
 export interface AuditEvent {id:number;subject:string;event:string;target:string|null;ip:string|null;userAgent:string|null;createdAt:number}
-export interface PostPage {page:number;pageSize:number;total:number;items:{slug:string;likes:number;views:number}[]}
 @Injectable({providedIn:'root'})
 export class Api {
   private http=inject(HttpClient);

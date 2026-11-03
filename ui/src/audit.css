@@ -1,0 +1,53 @@
+:host{display:block}
+svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}
+.stats>div,.stat{display:flex;flex-direction:column;align-items:flex-start;padding:16px;border:1px solid var(--ink-200);border-radius:12px;background:#fff;box-shadow:var(--shadow-sm);text-align:left;font:inherit;color:inherit}
+.stats strong{font-size:24px;font-weight:600;letter-spacing:-.025em;line-height:1.2;font-variant-numeric:tabular-nums}
+.stats span{margin-top:4px;font-size:13px;font-weight:500;color:var(--ink-900)}
+.stats small{font-size:11px;color:var(--ink-400)}
+.stat:disabled{cursor:default;opacity:1}
+.stat.warn{border-color:#fcd34d;box-shadow:0 0 0 1px #fde68a}
+.stat.warn strong{color:#c2410c}.stat.warn small{color:#b45309;font-weight:500}
+.stat.warn:hover{background:#fffbeb}
+.filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:10px}
+.search{position:relative;flex:1;min-width:220px}
+.search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--ink-400)}
+.search input,.filters select{height:34px;border:1px solid var(--ink-200);border-radius:8px;background:#fff;font-size:13px;box-shadow:var(--shadow-xs)}
+.search input{width:100%;padding:0 10px 0 32px}
+.filters select{padding:0 28px 0 10px}
+.search input:focus,.filters select:focus{outline:none;border-color:var(--brand-500);box-shadow:0 0 0 3px #10b98126}
+.segmented{display:inline-flex;padding:3px;border:1px solid var(--ink-200);border-radius:9px;background:#fff;box-shadow:var(--shadow-xs)}
+.segmented button{border:0;background:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:500;color:var(--ink-500)}
+.segmented button.active{background:var(--ink-900);color:#fff}
+.kinds{display:flex;gap:2px;margin-bottom:12px;box-shadow:inset 0 -1px 0 var(--ink-200);overflow-x:auto;scrollbar-width:none}
+.kinds button{background:none;border:0;border-bottom:2px solid transparent;padding:9px 12px;font-size:13px;font-weight:500;color:var(--ink-500);white-space:nowrap}
+.kinds button:hover{color:var(--ink-900)}
+.kinds button.active{color:var(--ink-900);border-bottom-color:var(--brand-500)}
+.log td{padding:10px 16px}
+.row{cursor:pointer}
+.when{white-space:nowrap;font-size:12px;color:var(--ink-600)}
+.who{display:inline-flex;align-items:center;gap:6px;font-weight:500;overflow-wrap:anywhere}
+.tag{font-size:10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;border-radius:4px;padding:1px 5px}
+.tag.app{background:var(--brand-50);color:var(--brand-700)}
+.tag.admin{background:var(--ink-100);color:var(--ink-600)}
+.event{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
+.event .dot{width:7px;height:7px}
+.event[data-tone=pull] .dot{color:var(--brand-500)}
+.event[data-tone=change] .dot{color:#3b82f6}
+.event[data-tone=token] .dot{color:#a855f7}
+.event[data-tone=denied]{color:#b91c1c;font-weight:500}
+.event[data-tone=other] .dot{color:var(--ink-300)}
+.target{color:var(--ink-700);overflow-wrap:anywhere}
+.from code{display:block;color:var(--ink-900)}
+.from small{display:block;margin-top:2px;font-size:11px;color:var(--ink-400)}
+tr.denied td{background:#fef2f2}
+tr.detail td{background:var(--ink-50);padding:12px 16px 16px}
+dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 24px;margin:0}
+dt{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-400)}
+dd{margin:2px 0 0;font-size:12px;color:var(--ink-800);overflow-wrap:anywhere}
+.more{display:flex;justify-content:center;margin:16px 0}
+.blank{text-align:center;padding:48px 24px;border:1px dashed var(--ink-300);border-radius:12px;background:#fff}
+.blank h3{margin:0 0 6px;font-size:15px}.blank p{margin:0;font-size:13px;color:var(--ink-500)}
+.footnote{margin-top:16px}
+@media(max-width:900px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}dl{grid-template-columns:1fr}}

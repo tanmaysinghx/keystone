@@ -480,3 +480,77 @@ async fn audit_records_who_pulled_what_from_where() {
     // Pulls only: writes and token issuance are filtered out.
     assert!(items.iter().all(|e| e["event"] != "vault.key.write"));
 }
+
+#[tokio::test]
+async fn audit_screen_filters_pages_summarises_and_exports() {
+    let (router, _) = app(false).await;
+    let call = Call { app: &router };
+    let token = seed(&call).await;
+    for _ in 0..3 {
+        let request = Request::get("/api/v1/vault/config")
+            .header("authorization", format!("Bearer {token}"))
+            .header("x-forwarded-for", "203.0.113.50")
+            .body(Body::empty())
+            .unwrap();
+        call.send(request).await;
+    }
+    let audit = "/api/v1/admin/vault/audit";
+    let (_, changes) = call
+        .admin("GET", &format!("{audit}?kind=changes"), None)
+        .await;
+    assert!(
+        changes["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["event"] != "vault.config.read")
+    );
+    let (_, by_ip) = call
+        .admin("GET", &format!("{audit}?q=203.0.113.50"), None)
+        .await;
+    assert_eq!(by_ip["items"].as_array().unwrap().len(), 3);
+    // Keyset paging: two pages of 2 cover the same rows as one page of 4, in order.
+    let (_, page1) = call.admin("GET", &format!("{audit}?limit=2"), None).await;
+    let next = page1["nextBefore"].as_i64().unwrap();
+    let (_, page2) = call
+        .admin("GET", &format!("{audit}?limit=2&before={next}"), None)
+        .await;
+    let (_, all) = call.admin("GET", &format!("{audit}?limit=4"), None).await;
+    let ids = |v: &Value| {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!([ids(&page1), ids(&page2)].concat(), ids(&all));
+    let (_, summary) = call
+        .admin("GET", &format!("{audit}/summary?app=billing"), None)
+        .await;
+    assert_eq!(summary["pulls"], 3);
+    assert_eq!(summary["activeTokens"], 1);
+    let (status, _) = call
+        .admin("GET", &format!("{audit}?kind=nonsense"), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let request = Request::get(format!("{audit}?app=billing&format=csv"))
+        .header("authorization", format!("Bearer {}", admin_token()))
+        .body(Body::empty())
+        .unwrap();
+    let (status, bytes, headers) = call.send(request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("keystone-vault-audit.csv")
+    );
+    let csv = String::from_utf8(bytes).unwrap();
+    assert!(csv.starts_with("time_utc,who,action,target,ip,user_agent\n"));
+    assert!(csv.contains("\"vault.config.read\""));
+    // The export is itself audited.
+    let (_, log) = call.admin("GET", &format!("{audit}?limit=1"), None).await;
+    assert_eq!(log["items"][0]["event"], "vault.audit.export");
+}

@@ -44,6 +44,17 @@ h3{font-size:14px;font-weight:600;margin:16px 0 4px}
 .top-right{display:flex;align-items:center;gap:10px}
 .restricted{font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-400)}
 .portal-link{padding:6px 12px}
+.topbar-title{font-size:14px;font-weight:600;color:var(--ink-700);margin-right:auto}
+.crumbs{display:flex;align-items:center;gap:8px;margin-right:auto;min-width:0;font-size:13px;color:var(--ink-500);white-space:nowrap;overflow:hidden}
+.crumbs strong{color:var(--ink-900);font-weight:600}.crumb-sep{color:var(--ink-300)}
+.nav-caption.with-action{display:flex;align-items:center;justify-content:space-between}
+.nav-caption.with-action button{width:22px;height:22px;border:1px solid var(--ink-800);border-radius:6px;background:none;color:var(--ink-400);font-size:14px;line-height:1;padding:0}
+.nav-caption.with-action button:hover:not(:disabled){color:#fff;border-color:var(--ink-600)}
+.app-dot{display:grid;place-items:center;width:22px;height:22px;flex-shrink:0;border-radius:6px;background:var(--ink-800);color:var(--ink-300);font:600 9px ui-monospace,SFMono-Regular,Menlo,monospace}
+.sidebar nav a.active .app-dot{background:var(--brand-700);color:#fff}
+.app-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-empty{margin:0;padding:4px 12px;font-size:12px;color:var(--ink-600)}
+.login-card .fine a{color:var(--brand-700);font-weight:500}
 .avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;flex-shrink:0;background:linear-gradient(135deg,var(--brand-400),var(--brand-700));color:#fff;font-size:12px;font-weight:600}
 .workspace-search{position:relative;width:100%;max-width:448px}
 .workspace-search>svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;fill:none;stroke:var(--ink-400);stroke-width:2;pointer-events:none}
@@ -162,3 +173,12 @@ footer{display:flex;justify-content:space-between;gap:12px;margin-top:40px;paddi
   td,th{padding:10px 12px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
+
+/* Header search results (Portal SSO pattern) */
+.workspace-search kbd{position:absolute;right:10px;top:50%;transform:translateY(-50%);border:1px solid var(--ink-200);border-radius:4px;background:#fff;padding:1px 6px;font:600 10px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink-400);box-shadow:var(--shadow-xs);pointer-events:none}
+.search-results{max-height:380px;overflow-y:auto}
+.result-group{margin:0;padding:8px 10px 4px!important;font-size:10px!important;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-400)}
+.search-results button{display:flex;width:100%;justify-content:space-between;align-items:baseline;gap:12px;border:0;background:none;border-radius:8px;padding:8px 10px;text-align:left;font-size:12px;font-weight:500;color:var(--ink-900)}
+.search-results button small{font-size:11px;font-weight:400;color:var(--ink-400);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.search-results button.active{background:var(--ink-50)}
+.no-results{padding:10px!important}
