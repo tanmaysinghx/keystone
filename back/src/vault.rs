@@ -189,7 +189,8 @@ pub async fn audit(
     )
     .bind(&actor.subject)
     .bind(event)
-    .bind(target)
+    // Fits the column on every database; targets are short except unusual token allow-lists.
+    .bind(target.chars().take(1000).collect::<String>())
     .bind(&actor.ip)
     .bind(&actor.user_agent)
     .bind(crate::now() as i64)

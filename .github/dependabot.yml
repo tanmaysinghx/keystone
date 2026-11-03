@@ -13,6 +13,11 @@ updates:
       rust-minor-and-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+    # Breaking releases (sqlx 0.9, aes-gcm 0.11, jsonwebtoken 11, ...) change APIs or, for the
+    # crypto crates, on-disk formats: planned upgrades with code changes, not bump PRs.
+    ignore:
+      - dependency-name: "*"
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: npm
     directory: /ui
@@ -33,6 +38,11 @@ updates:
         update-types: [version-update:semver-major]
       - dependency-name: "typescript"
         update-types: [version-update:semver-major, version-update:semver-minor]
+      # Test tooling majors (vitest, jsdom) move with Angular's supported versions.
+      - dependency-name: "vitest"
+        update-types: [version-update:semver-major]
+      - dependency-name: "jsdom"
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: maven
     directory: /examples/spring-boot

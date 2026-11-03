@@ -1,7 +1,8 @@
 -- Keystone Vault schema for MySQL 8.0+ (and MariaDB 10.6+), equivalent to the SQLite migrations
 -- 001-005. Text that is compared or indexed uses binary collation, so key names stay
--- case-sensitive exactly as on SQLite. Integers are BIGINT and text VARCHAR, which is what the
--- database-agnostic driver decodes.
+-- case-sensitive exactly as on SQLite. Integers are BIGINT, text VARCHAR and bytes BLOB: the
+-- database-agnostic driver decodes VARCHAR as text and BLOB as bytes. (MySQL reports VARBINARY
+-- as a string type, so it cannot hold encrypted values here.)
 
 CREATE TABLE reactions (
     slug VARCHAR(100) NOT NULL,
@@ -30,7 +31,7 @@ CREATE TABLE vault_apps (
     name VARCHAR(80) NOT NULL,
     description VARCHAR(500) NOT NULL DEFAULT '',
     portal_client_id VARCHAR(63) NULL,
-    wrapped_key VARBINARY(128) NOT NULL,
+    wrapped_key BLOB NOT NULL,
     created_by VARCHAR(320) NOT NULL,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL
@@ -75,20 +76,20 @@ CREATE TABLE vault_tokens (
     app_id VARCHAR(63) NOT NULL,
     environment VARCHAR(40) NOT NULL,
     name VARCHAR(80) NOT NULL,
-    secret_hash VARBINARY(32) NOT NULL,
+    secret_hash BLOB NOT NULL,
     created_by VARCHAR(320) NOT NULL,
     created_at BIGINT NOT NULL,
     expires_at BIGINT NULL,
     last_used_at BIGINT NULL,
     revoked_at BIGINT NULL,
-    allowed_cidrs VARCHAR(2048) NULL,
+    allowed_cidrs VARCHAR(4096) NULL,
     INDEX vault_tokens_by_app (app_id),
     FOREIGN KEY (app_id, environment) REFERENCES vault_environments(app_id, name) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE vault_meta (
     `key` VARCHAR(64) NOT NULL PRIMARY KEY,
-    value VARBINARY(256) NOT NULL
+    value BLOB NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE vault_change_requests (
@@ -114,7 +115,7 @@ CREATE TABLE vault_change_requests (
 
 CREATE TABLE vault_settings (
     `key` VARCHAR(64) NOT NULL PRIMARY KEY,
-    value VARBINARY(2048) NOT NULL,
+    value BLOB NOT NULL,
     updated_by VARCHAR(320) NOT NULL,
     updated_at BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;

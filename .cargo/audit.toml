@@ -2,7 +2,9 @@
 [advisories]
 ignore = [
   # RUSTSEC-2023-0071 (rsa, "Marvin" timing side channel). It affects RSA private-key decryption
-  # and signing. Keystone only verifies Portal SSO's RS256 access-token signatures with public keys
-  # (jsonwebtoken DecodingKey), so no private key operation exists to attack. No fixed rsa release.
+  # and signing. rsa is only in the tree through sqlx's MySQL driver, which uses it to encrypt the
+  # login password with the server's public key (caching_sha2_password without TLS): a public-key
+  # operation the attack does not apply to. JWT verification uses aws-lc-rs, not this crate.
+  # No fixed rsa 0.9 release exists. Prefer ?ssl-mode=required, which skips RSA entirely.
   "RUSTSEC-2023-0071",
 ]

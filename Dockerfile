@@ -28,6 +28,8 @@ COPY back/Cargo.toml back/
 RUN mkdir -p back/src && echo 'fn main() {}' > back/src/main.rs && echo '' > back/src/lib.rs \
     && cargo build --release -p keystone && rm -rf back/src
 COPY back/ back/
+# The license is compiled in (it is shown in first-time setup).
+COPY LICENSE ./
 COPY --from=console /build/ui/dist/ ui/dist/
 RUN touch back/src/main.rs back/src/lib.rs && cargo build --release -p keystone \
     && mkdir -p /out/var/lib/keystone && cp target/release/keystone /out/keystone
