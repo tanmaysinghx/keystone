@@ -1,0 +1,295 @@
+name: CI
+
+# Pipeline (jobs within a stage run in parallel), modelled on Portal SSO's:
+#
+#   1 · Build & test       backend (fmt, clippy, tests on SQLite and on MySQL 8.4) · console
+#   2 · Static analysis    CodeQL (Rust, TypeScript) · dependency audit
+#   3 · Package            single binary + smoke test · container image + health check ·
+#                          Spring Boot end-to-end (a real Spring app loads secrets at startup)
+#   4 · Gate               one required status check for branch protection
+#   5 · Release            main pushes only: tag v1.0.<run>, binaries for 5 platforms, GHCR image
+#
+# Every job has to prove something: a stage that cannot fail is decoration, not a gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  # Stage 1 · Build & test
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  backend:
+    name: "Stage 1 · Backend tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace 2>&1 | tee test-output.txt
+      # A green build that ran no tests is worse than a red one, so the count is asserted.
+      - name: Assert tests actually ran
+        run: |
+          total=$(grep -Eo 'test result: ok\. [0-9]+ passed' test-output.txt | awk '{s+=$4} END {print s+0}')
+          echo "Executed $total tests."
+          echo "### Backend tests: $total passed" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$total" -lt 30 ]; then
+            echo "::error::Only $total tests ran; expected at least 30. A suite that shrank silently is a defect."
+            exit 1
+          fi
+
+  backend-mysql:
+    name: "Stage 1 · Backend tests on MySQL"
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: keystone-ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -pkeystone-ci"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every test gets its own new MySQL database, so the whole suite proves the MySQL schema
+      # and SQL, not only SQLite.
+      - name: Test against MySQL 8.4
+        env:
+          KEYSTONE_TEST_MYSQL_URL: mysql://root:keystone-ci@127.0.0.1:3306
+        run: cargo test --workspace 2>&1 | tee test-output.txt
+      - name: Assert tests actually ran
+        run: |
+          total=$(grep -Eo 'test result: ok\. [0-9]+ passed' test-output.txt | awk '{s+=$4} END {print s+0}')
+          echo "### Backend tests on MySQL: $total passed" >> "$GITHUB_STEP_SUMMARY"
+          [ "$total" -ge 30 ] || { echo "::error::Only $total tests ran on MySQL."; exit 1; }
+
+  console:
+    name: "Stage 1 · Console tests & build"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm --prefix ui ci
+      - run: npm --prefix ui test
+      - run: npm --prefix ui run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console
+          path: ui/dist/
+          retention-days: 3
+
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  # Stage 2 · Static analysis
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  codeql:
+    name: "Stage 2 · CodeQL (${{ matrix.language }})"
+    runs-on: ubuntu-latest
+    needs: [backend, console]
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+
+  audit:
+    name: "Stage 2 · Dependency audit"
+    runs-on: ubuntu-latest
+    needs: [backend, console]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Rust advisories (RustSec)
+        run: cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Console production dependencies
+        run: npm --prefix ui audit --omit=dev --audit-level=high
+
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  # Stage 3 · Package
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  binary:
+    name: "Stage 3 · Single binary"
+    runs-on: ubuntu-latest
+    needs: [backend, console]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: console
+          path: ui/dist/
+      - run: cargo build --release -p keystone
+      - name: Smoke test (first start, embedded console, CLI operations)
+        run: |
+          set -euo pipefail
+          bin=target/release/keystone home=$(mktemp -d)
+          $bin init --home "$home"
+          test -f "$home/keystone.properties" && test -f "$home/secrets/master.key"
+          [ "$(stat -c %a "$home/secrets/master.key")" = 600 ]
+          $bin --home "$home" --httpPort=18090 & pid=$!
+          for i in $(seq 1 50); do $bin healthcheck --home "$home" --httpPort=18090 && break; sleep 0.2; done
+          curl -fsS http://127.0.0.1:18090/api/v1/info | grep -q '"Keystone Vault"'
+          curl -fsS http://127.0.0.1:18090/ | grep -qi '<app-root'
+          curl -fsS http://127.0.0.1:18090/docs/install | grep -qi '<app-root'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18090/api/v1/vault/config)" = 401
+          # First-time setup over the API, as the wizard does it: license, setup key, local admin.
+          curl -s http://127.0.0.1:18090/api/v1/setup/status | grep -q '"required":true'
+          key=$(cat "$home/secrets/setup.key")
+          curl -fsS -X POST -H "x-setup-key: $key" http://127.0.0.1:18090/api/v1/setup/verify
+          curl -fsS -X POST -H "x-setup-key: $key" -H 'content-type: application/json' \
+            -d '{"accept":true,"licenseId":"Apache-2.0"}' http://127.0.0.1:18090/api/v1/setup/license
+          curl -fsS -X POST -H "x-setup-key: $key" -H 'content-type: application/json' \
+            -d '{"admin":{"email":"ci@example.com","name":"CI","password":"Correct-Horse-42"}}' \
+            http://127.0.0.1:18090/api/v1/setup/finish | grep -q '"restart":true'
+          sleep 2
+          for i in $(seq 1 50); do $bin healthcheck --home "$home" --httpPort=18090 && break; sleep 0.2; done
+          kill -0 $pid   # restarted in place: same process
+          curl -fsS -X POST -H 'content-type: application/json' \
+            -d '{"email":"ci@example.com","password":"Correct-Horse-42"}' \
+            http://127.0.0.1:18090/api/v1/auth/local/login | grep -q '"token":"kss_'
+          test ! -f "$home/secrets/setup.key"
+          kill $pid; wait $pid || true
+          $bin backup --home "$home"
+          $bin rotate-master-key --home "$home" --httpPort=18090
+          $bin --home "$home" --httpPort=18090 & pid=$!
+          for i in $(seq 1 50); do $bin healthcheck --home "$home" --httpPort=18090 && break; sleep 0.2; done
+          kill $pid; wait $pid || true
+          echo "### Binary: $(du -h $bin | cut -f1), $($bin version)" >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: "Stage 3 · Container image"
+    runs-on: ubuntu-latest
+    needs: [backend, console]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: keystone-vault:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Start, wait for healthy, check it runs unprivileged
+        run: |
+          set -euo pipefail
+          [ "$(docker inspect -f '{{.Config.User}}' keystone-vault:ci)" = "65532:65532" ]
+          docker run -d --name ks -p 18090:8090 keystone-vault:ci
+          for i in $(seq 1 40); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' ks)
+            [ "$status" = healthy ] && break
+            sleep 1
+          done
+          docker logs ks
+          [ "$(docker inspect -f '{{.State.Health.Status}}' ks)" = healthy ]
+          curl -fsS http://127.0.0.1:18090/api/v1/info
+
+  spring-e2e:
+    name: "Stage 3 · Spring Boot end-to-end"
+    runs-on: ubuntu-latest
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+      - name: Build the example app
+        run: mvn -B -q -f examples/spring-boot/pom.xml package -DskipTests
+      - name: Serve a seeded vault, then start Spring Boot and the keystone CLI against it
+        run: |
+          set -euo pipefail
+          export KEYSTONE_E2E_TOKEN_FILE=$RUNNER_TEMP/token KEYSTONE_E2E_SECONDS=120
+          cargo test -p keystone --test spring_e2e -- --ignored --nocapture > e2e.log 2>&1 &
+          for i in $(seq 1 600); do grep -q E2E-READY e2e.log && break; sleep 1; done
+          grep -q E2E-READY e2e.log
+          export KEYSTONE_URL=http://127.0.0.1:18093 KEYSTONE_TOKEN=$(cat "$KEYSTONE_E2E_TOKEN_FILE")
+          out=$(java -jar examples/spring-boot/target/orders-service-0.0.1.jar)
+          echo "$out" | grep KEYSTONE-CHECK
+          echo "$out" | grep -q 'spring.datasource.url=jdbc:postgresql://qa-db.internal:5432/orders'
+          echo "$out" | grep -q 'orders.retry-limit=5'
+          echo "$out" | grep -q 'orders.payment-gateway=https://sandbox.pay.example'
+          # Fail fast with a wrong token.
+          wrong="${KEYSTONE_TOKEN%%.*}.$(printf 'A%.0s' $(seq 43))"
+          if KEYSTONE_TOKEN="$wrong" java -jar examples/spring-boot/target/orders-service-0.0.1.jar; then
+            echo "::error::Spring Boot started with an invalid token"; exit 1
+          fi
+          # The CLI client: pull and run.
+          ./target/debug/keystone pull --format=properties | grep -q 'orders.retry-limit=5'
+          ./target/debug/keystone run -- sh -c 'test "$ORDERS_RETRY_LIMIT" = 5 && test -n "$SPRING_DATASOURCE_PASSWORD"'
+
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  # Stage 4 · Gate
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  ci-status:
+    name: "Stage 4 · CI status"
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [backend, backend-mysql, console, codeql, audit, binary, image, spring-e2e]
+    steps:
+      - name: Every stage passed
+        run: |
+          results='${{ toJSON(needs.*.result) }}'
+          echo "$results"
+          if echo "$results" | grep -Eq '"(failure|cancelled|skipped)"'; then
+            echo "::error::A required stage did not pass."
+            exit 1
+          fi
+
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  # Stage 5 · Release (main pushes only)
+  # ───────────────────────────────────────────────────────────────────────────────────────────────
+  release:
+    name: "Stage 5 · Release"
+    needs: [ci-status]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.ci-status.result == 'success'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      version: 1.0.${{ github.run_number }}

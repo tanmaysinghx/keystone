@@ -1,0 +1,10 @@
+target/
+**/node_modules/
+ui/dist/
+ui/.angular/
+data/
+.env
+.env.*
+!.env.example
+examples/**/target/
+*.db

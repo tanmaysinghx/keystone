@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { VaultComponent } from './vault';
 import { Api } from './api';
 const status={sealed:false,apps:1,keys:1,files:0,activeTokens:0,portalUrl:'https://portal.test'};
-const app={id:'billing',name:'Billing',description:'',portalClientId:'billing',createdAt:1,updatedAt:1,environments:['default','prod'],keyCount:1,fileCount:0,activeTokens:0};
+const app={id:'billing',name:'Billing',description:'',portalClientId:'billing',createdAt:1,updatedAt:1,environments:['default','prod'],protectedEnvironments:['prod'],role:'ROLE_VAULT_BILLING',keyCount:1,fileCount:0,activeTokens:0};
 function fake(overrides:Record<string,unknown>={}){
   const calls:string[]=[];
   const api={calls,

@@ -1,0 +1,98 @@
+<section class="page-heading">
+  <div><h1>Settings</h1><p class="lede">Alerts, backups and how this server is configured. Everything else lives in <code>keystone.properties</code>.</p></div>
+</section>
+@if(error()){<div class="notice error">{{error()}}</div>}
+@if(toast()){<div class="notice" role="status">{{toast()}}</div>}
+@if(s(); as s){
+<div class="grid">
+  <section class="card section">
+    <h2>Alerts</h2>
+    <p>Refused tokens, deletions, protection turned off, changes waiting for approval, audit exports and failed backups are sent to a Slack or Microsoft Teams incoming webhook, or any endpoint that accepts JSON.</p>
+    @if(s.alerts.configured){<p><span class="good">● Sending to {{s.alerts.host}}</span> @if(s.alerts.source==='config'){(set in keystone.properties)}</p>}
+    @else{<p><span class="bad">● Not set up</span></p>}
+    @if(s.alerts.source!=='config'){
+      <div class="form"><input type="url" placeholder="https://hooks.slack.com/services/…" [value]="webhook()" (input)="webhook.set($any($event.target).value)" aria-label="Webhook URL"><button class="primary" [disabled]="busy() || !webhook().trim()" (click)="saveWebhook()">Save</button></div>
+    }
+    <div class="form" style="margin-top:10px">
+      <button class="quiet" [disabled]="busy() || !s.alerts.configured" (click)="testAlert()">Send test alert</button>
+      @if(s.alerts.source==='console'){<button class="quiet" [disabled]="busy()" (click)="saveWebhook(true)">Remove</button>}
+    </div>
+  </section>
+
+  <section class="card section">
+    <h2>Master key</h2>
+    <p>Wraps every application's encryption key. Without it no secret can be decrypted, so keep a copy somewhere other than this server.</p>
+    <dl>
+      <dt>Status</dt><dd>@if(s.masterKey.configured){<span class="good">Unsealed</span>}@else{<span class="bad">Sealed</span>}</dd>
+      <dt>Source</dt><dd><code>{{s.masterKey.source}}</code></dd>
+      <dt>Rotate</dt><dd>Stop the server, run <code>keystone rotate-master-key</code>, start it again.</dd>
+    </dl>
+  </section>
+
+  <section class="card section full">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div><h2>Backups</h2><p>Consistent snapshots of the database. Secrets stay encrypted inside them, and the master key is never included. Restore with <code>keystone restore FILE</code> while the server is stopped.</p></div>
+      <button class="primary" [disabled]="busy()" (click)="backupNow()">Back up now</button>
+    </div>
+    <dl style="margin-bottom:14px">
+      <dt>Schedule</dt><dd>@if(s.backups.intervalHours){Every {{s.backups.intervalHours}} hours, keeping {{s.backups.keep}}}@else{<span class="bad">Automatic backups are off</span> (set <code>backup.interval-hours</code>)}</dd>
+      <dt>Folder</dt><dd><code>{{s.backups.dir}}</code></dd>
+    </dl>
+    @if(backups().length){
+      <div class="table-wrap"><table>
+        <thead><tr><th>Backup</th><th>Taken</th><th>Size</th><th></th></tr></thead>
+        <tbody>@for(b of backups(); track b.name){
+          <tr><td><code>{{b.name}}</code> @if(b.automatic){<span class="status">auto</span>}</td><td>{{b.createdAt*1000 | date:'MMM d, HH:mm'}}</td><td>{{size(b.size)}}</td><td style="text-align:right"><button class="quiet" (click)="download(b)">Download</button></td></tr>
+        }</tbody>
+      </table></div>
+    } @else {<p class="fine">No backups yet.</p>}
+  </section>
+
+  <section class="card section full">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+      <div><h2>Users</h2><p>@if(localEnabled()){Local accounts sign in with email and password. Roles work like Portal's: Administrator, or owner of specific applications.}@else{Local accounts are off; people sign in with Portal SSO. Turn them on with <code>auth.local=true</code> in keystone.properties.}</p></div>
+      @if(localEnabled()){<button class="primary" [disabled]="busy()" (click)="newUser()">Add user</button>}
+    </div>
+    @if(users().length){
+      <div class="table-wrap"><table>
+        <thead><tr><th>User</th><th>Roles</th><th>Last sign-in</th><th></th></tr></thead>
+        <tbody>@for(u of users(); track u.id){
+          <tr [style.opacity]="u.disabled ? .5 : 1">
+            <td><strong>{{u.name}}</strong><br><span class="fine">{{u.email}}</span>@if(u.disabled){ <span class="status rejected">disabled</span>}</td>
+            <td>@for(r of u.roles; track r){<span class="status" [class.applied]="r==='ROLE_ADMIN'" style="margin-right:4px">{{roleLabel(r)}}</span>}@empty{<span class="fine">none</span>}</td>
+            <td class="fine">{{u.lastLoginAt ? (u.lastLoginAt*1000 | date:'MMM d, HH:mm') : 'Never'}}</td>
+            <td style="text-align:right;white-space:nowrap"><button class="quiet" (click)="editUser(u)">Edit</button> <button class="quiet" [disabled]="busy()" (click)="toggleUser(u)">{{u.disabled ? 'Enable' : 'Disable'}}</button> <button class="quiet" [disabled]="busy()" (click)="deleteUser(u)">Delete</button></td>
+          </tr>
+        }</tbody>
+      </table></div>
+    } @else if(localEnabled()) {<p class="fine">No local users yet.</p>}
+  </section>
+
+  <section class="card section full">
+    <h2>Server</h2>
+    <p>Change these in the config file (or with <code>KEYSTONE_*</code> environment variables) and restart.</p>
+    <dl>
+      <dt>Version</dt><dd>{{s.version}}</dd>
+      <dt>Config file</dt><dd><code>{{s.configFile || '(none: defaults and environment)'}}</code></dd>
+      <dt>Home</dt><dd><code>{{s.home}}</code></dd>
+      <dt>Listening on</dt><dd><code>{{s.bind}}</code> @if(s.trustProxy){· client IPs from X-Forwarded-For}</dd>
+      <dt>Portal SSO</dt><dd><code>{{s.portal.url || 'not connected'}}</code> · client <code>{{s.portal.clientId || '—'}}</code></dd>
+      <dt>Token lockout</dt><dd>{{s.security.failedTokenLimit}} failures per IP → locked {{s.security.lockoutMinutes}} min</dd>
+      <dt>Rotation warning</dt><dd>keys older than {{s.security.rotationDays}} days · tokens expiring within {{s.security.tokenExpiryWarningDays}} days</dd>
+    </dl>
+  </section>
+</div>
+}
+
+@if(userForm(); as f){
+<div class="modal-backdrop" (click)="userForm.set(null)"></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="user-title">
+  <h2 id="user-title">{{f.id === null ? 'Add user' : 'Edit ' + f.email}}</h2>
+  @if(f.id === null){<label>Email<input type="email" [value]="f.email" (input)="patchUser({email:$any($event.target).value})" autocomplete="off"></label>}
+  <label>Name<input [value]="f.name" (input)="patchUser({name:$any($event.target).value})"></label>
+  <label>{{f.id === null ? 'Password' : 'New password (leave empty to keep)'}}<input type="password" [value]="f.password" (input)="patchUser({password:$any($event.target).value})" autocomplete="new-password"><small>At least 12 characters, mixing three of: lower case, upper case, digits, symbols. Changing it signs the user out.</small></label>
+  <label class="checkline"><input type="checkbox" [checked]="f.admin" (change)="patchUser({admin:$any($event.target).checked})"> Administrator (everything, including settings and users)</label>
+  <label>Owns applications<input [value]="f.apps" (input)="patchUser({apps:$any($event.target).value})" placeholder="orders-service, billing"><small>Comma-separated application ids. Owners manage only those applications.</small></label>
+  <div class="modal-actions"><button class="quiet" (click)="userForm.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !f.name.trim() || (f.id === null && (!f.email.trim() || !f.password))" (click)="saveUser()">Save</button></div>
+</div>
+}

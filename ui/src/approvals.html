@@ -1,0 +1,35 @@
+<section class="page-heading">
+  <div><h1>Approvals</h1><p class="lede">Changes to protected environments wait here until another administrator approves them. Nothing is applied before that.</p></div>
+</section>
+@if(error()){<div class="notice error">{{error()}}</div>}
+@if(toast()){<div class="notice" role="status">{{toast()}}</div>}
+<nav class="tabs"><button [class.active]="status()==='pending'" (click)="setStatus('pending')">Waiting</button><button [class.active]="status()==='all'" (click)="setStatus('all')">History</button></nav>
+@if(items().length){
+  <div class="card list">
+    @for(c of items(); track c.id){
+      <div class="row">
+        <div class="grow">
+          <h3><span class="op" [class]="'op ' + c.operation">{{c.operation}}</span>{{c.summary}}</h3>
+          <p><code>{{c.app}}/{{c.environment}}</code> · proposed by {{who(c.requestedBy)}} · {{c.createdAt*1000 | date:'MMM d, HH:mm'}}</p>
+          @if(c.status!=='pending'){<div class="meta"><span class="status" [class]="'status ' + c.status">{{c.status}}</span> by {{who(c.decidedBy)}} · {{(c.decidedAt ?? 0)*1000 | date:'MMM d, HH:mm'}}</div>}
+          @if(review()[c.id]; as r){
+            <div class="diff">
+              <div><small>Current</small><pre>{{r.current ?? '(not set)'}}</pre></div>
+              <div class="new"><small>Proposed</small><pre>{{r.proposed ?? (c.operation==='delete' ? '(deleted)' : '—')}}</pre></div>
+            </div>
+          }
+        </div>
+        <div class="actions">
+          @if(c.operation!=='delete' || c.status==='pending'){<button class="quiet" (click)="show(c)">{{review()[c.id] ? 'Hide' : 'Review'}}</button>}
+          @if(c.status==='pending'){
+            <button class="quiet" [disabled]="busy()===c.id" (click)="decide(c,'reject')">Reject</button>
+            <button class="primary" [disabled]="busy()===c.id" (click)="decide(c,'approve')">Approve</button>
+          }
+        </div>
+      </div>
+    }
+  </div>
+  <p class="fine">You cannot approve your own change; withdrawing it is shown as cancelled. Reviewing a proposed value is audited like any reveal.</p>
+} @else if(loaded()) {
+  <div class="blank"><span class="ok-mark"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><h3>{{status()==='pending' ? 'Nothing waiting' : 'No change requests yet'}}</h3><p>Protect an environment (⋯ menu on its page) to require a second administrator for every change.</p></div>
+}

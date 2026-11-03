@@ -74,8 +74,8 @@ fn check_slug(slug: &str) -> Result<(), ApiError> {
         ))
     }
 }
-pub async fn counts(pool: &sqlx::SqlitePool, slug: &str) -> Result<Stats, ApiError> {
-    let (views, likes): (i64, i64) = sqlx::query_as("SELECT COALESCE(SUM(action = 'view'),0), COALESCE(SUM(action = 'like'),0) FROM reactions WHERE slug = ?")
+pub async fn counts(pool: &crate::db::Db, slug: &str) -> Result<Stats, ApiError> {
+    let (views, likes): (i64, i64) = sqlx::query_as("SELECT CAST(COALESCE(SUM(CASE WHEN action = 'view' THEN 1 ELSE 0 END), 0) AS SIGNED), CAST(COALESCE(SUM(CASE WHEN action = 'like' THEN 1 ELSE 0 END), 0) AS SIGNED) FROM reactions WHERE slug = ?")
         .bind(slug).fetch_one(pool).await?;
     Ok(Stats {
         views,
@@ -112,13 +112,15 @@ pub async fn react(
         "forever".into()
     };
     // One atomic insert and a unique key make parallel requests/retries idempotent.
-    sqlx::query(
-        "INSERT OR IGNORE INTO reactions (slug, visitor, action, bucket) VALUES (?, ?, ?, ?)",
-    )
+    sqlx::query(&format!(
+        "{} reactions (slug, visitor, action, bucket, created_at) VALUES (?, ?, ?, ?, ?)",
+        state.dialect.insert_ignore()
+    ))
     .bind(&body.slug)
     .bind(&visitor)
     .bind(&body.action)
     .bind(bucket)
+    .bind(crate::now() as i64)
     .execute(&state.db)
     .await?;
     Ok(Json(counts(&state.db, &body.slug).await?))

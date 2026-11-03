@@ -1,0 +1,36 @@
+[Unit]
+Description=Keystone Vault - secrets and configuration for the Portal SSO suite
+Documentation=https://github.com/tanmaysinghx/keystone-vault
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=keystone
+Group=keystone
+ExecStart=/usr/local/bin/keystone serve --home /var/lib/keystone --config /etc/keystone/keystone.properties
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Sandboxing & hardening
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/keystone
+ReadOnlyPaths=/etc/keystone
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

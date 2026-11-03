@@ -1,0 +1,100 @@
+<div class="setup">
+  <header class="setup-bar"><img src="/logo.svg" width="32" height="32" alt="">Keystone Vault<span class="tag">Setup</span>@if(status()?.version){<span class="ver">v{{status()!.version}}</span>}</header>
+  <div class="setup-body">
+    <aside class="setup-steps" aria-label="Setup steps">
+      <h1>Set up Keystone</h1>
+      <p>A few minutes, once. Everything here can be changed later in <code>keystone.properties</code>.</p>
+      <ol>
+        @for(s of steps; track s.id; let i = $index){
+          <li [class.active]="s.id===step()" [class.done]="i < index()"><button (click)="go(s.id)" [disabled]="i > index()"><span class="dot">@if(i < index()){✓}@else{{{i+1}}}</span><span><strong>{{s.label}}</strong><small>{{s.hint}}</small></span></button></li>
+        }
+      </ol>
+    </aside>
+
+    <section class="setup-card">
+      @if(error()){<div class="notice error" role="alert">{{error()}}</div>}
+
+      @switch(step()){
+      @case('license'){
+        <p class="eyebrow">Step 1 of 5</p><h2>License agreement</h2>
+        <p class="lead">Keystone Vault is licensed under the <strong>Apache License 2.0</strong>, the same license as Portal SSO. Read it and accept to continue.</p>
+        <div class="license" tabindex="0" aria-label="License text">@for(p of paragraphs(); track $index){<p>{{p}}</p>}@empty{<p>Loading…</p>}</div>
+        <label class="check"><input type="checkbox" [checked]="accepted()" (change)="accepted.set($any($event.target).checked)"> I have read and accept the Apache License 2.0</label>
+        <div class="actions"><span></span><button class="primary" [disabled]="!accepted() || !licenseText()" (click)="step.set('key')">Continue</button></div>
+      }
+      @case('key'){
+        <p class="eyebrow">Step 2 of 5</p><h2>Enter the setup key</h2>
+        <p class="lead">Keystone printed a one-time setup key when it started, and saved it on the server. It proves you can reach the server, not just this page.</p>
+        <div class="where"><div><small>Server log</small><code>keystone</code> output, in a box at startup</div><div><small>File</small><code>{{status()?.keyFile}}</code></div><div><small>Docker</small><code>docker compose logs keystone</code></div></div>
+        <label>Setup key<input [value]="key()" (input)="key.set($any($event.target).value)" (keydown.enter)="key().trim() && continueKey()" placeholder="xxxxxx-xxxxxx-xxxxxx-xxxxxx-xxxxxx" autocomplete="off" spellcheck="false" autofocus></label>
+        <div class="actions"><button class="quiet" (click)="step.set('license')">Back</button><button class="primary" [disabled]="busy() || !key().trim()" (click)="continueKey()">{{busy() ? 'Checking…' : 'Continue'}}</button></div>
+      }
+      @case('signin'){
+        <p class="eyebrow">Step 3 of 5</p><h2>How will people sign in?</h2>
+        <p class="lead">Use Portal SSO, local accounts, or both. With both, a local administrator still gets in when Portal is unavailable.</p>
+        <div class="choice" [class.on]="usePortal()">
+          <label class="choice-head"><input type="checkbox" [checked]="usePortal()" (change)="usePortal.set($any($event.target).checked)" [disabled]="portalFixed()"><span><strong>Portal SSO</strong><small>Single sign-on with your Portal SSO server. Its ROLE_ADMIN users manage Keystone.</small></span></label>
+          @if(usePortal()){
+            @if(portalFixed()){<p class="fine">Set by an environment variable: <code>{{status()?.portal?.url}}</code></p>}
+            @else{
+              <div class="row">
+                <label class="grow">Portal SSO address<input [value]="portalUrl()" (input)="portalUrl.set($any($event.target).value); portalOk.set(false)" placeholder="https://sso.example.com"></label>
+                <label>Client id<input [value]="clientId()" (input)="clientId.set($any($event.target).value); portalOk.set(false)" placeholder="keystone"></label>
+              </div>
+              <div class="row-actions"><button class="quiet" [disabled]="busy() || !portalUrl().trim()" (click)="testPortal()">Test connection</button>@if(portalOk()){<span class="ok">✓ Portal SSO answered</span>}</div>
+              <p class="fine">Register Keystone in Portal first (Applications → New application, public client), or later run <code>keystone connect-portal</code>.</p>
+            }
+          }
+        </div>
+        <div class="choice" [class.on]="useLocal()">
+          <label class="choice-head"><input type="checkbox" [checked]="useLocal()" (change)="useLocal.set($any($event.target).checked)"><span><strong>Local accounts</strong><small>Email and password, managed in Keystone under Settings → Users. No Portal needed.</small></span></label>
+          @if(useLocal()){
+            @if(existingAdmins() > 0){<p class="fine">{{existingAdmins()}} local administrator(s) already exist.</p>}
+            @else{
+              <p class="fine">Create the first administrator.</p>
+              <div class="row"><label class="grow">Email<input type="email" [value]="adminEmail()" (input)="adminEmail.set($any($event.target).value)" autocomplete="username"></label><label class="grow">Name<input [value]="adminName()" (input)="adminName.set($any($event.target).value)"></label></div>
+              <div class="row"><label class="grow">Password<input type="password" [value]="adminPassword()" (input)="adminPassword.set($any($event.target).value)" autocomplete="new-password"></label><label class="grow">Confirm<input type="password" [value]="adminConfirm()" (input)="adminConfirm.set($any($event.target).value)" autocomplete="new-password"></label></div>
+              @if(passwordProblem()){<p class="warn">{{passwordProblem()}}</p>}@else{<p class="fine">At least 12 characters, mixing three of: lower case, upper case, digits, symbols.</p>}
+            }
+          }
+        </div>
+        <div class="actions"><button class="quiet" (click)="step.set('key')">Back</button><button class="primary" [disabled]="!signInReady()" (click)="step.set('database')">Continue</button></div>
+      }
+      @case('database'){
+        <p class="eyebrow">Step 4 of 5</p><h2>Where should Keystone keep its data?</h2>
+        <p class="lead">Secrets are encrypted before they reach the database either way.</p>
+        @if(status()?.database?.fixed){<div class="notice">The database is set by an environment variable: <code>{{status()?.database?.url}}</code></div>}
+        @else{
+          <label class="option" [class.on]="engine()==='sqlite'"><input type="radio" name="engine" [checked]="engine()==='sqlite'" (change)="engine.set('sqlite')"><span><strong>Built-in (SQLite)</strong><small>Nothing to install. A single file at <code>{{status()?.database?.url}}</code>. Right for most teams; move to MySQL any time with <code>keystone migrate</code>.</small></span></label>
+          <label class="option" [class.on]="engine()==='mysql'"><input type="radio" name="engine" [checked]="engine()==='mysql'" (change)="engine.set('mysql')"><span><strong>MySQL 8.0+ / MariaDB 10.6+</strong><small>For an existing managed database or high availability. Create an empty database and a user first.</small></span></label>
+          @if(engine()==='mysql'){
+            <div class="mysql">
+              <div class="row"><label class="grow">Host<input [value]="mysql().host" (input)="setMysql({host:$any($event.target).value})" placeholder="db.example.com"></label><label class="port">Port<input [value]="mysql().port" (input)="setMysql({port:$any($event.target).value})"></label></div>
+              <div class="row"><label class="grow">Database<input [value]="mysql().database" (input)="setMysql({database:$any($event.target).value})"></label><label class="grow">User<input [value]="mysql().user" (input)="setMysql({user:$any($event.target).value})" autocomplete="off"></label><label class="grow">Password<input type="password" [value]="mysql().password" (input)="setMysql({password:$any($event.target).value})" autocomplete="new-password"></label></div>
+              <label class="check"><input type="checkbox" [checked]="mysql().tls" (change)="setMysql({tls:$any($event.target).checked})"> Require TLS (recommended unless the database is on this host)</label>
+              <div class="row-actions"><button class="quiet" [disabled]="busy() || !mysql().host.trim() || !mysql().database.trim()" (click)="testDatabase()">{{busy() ? 'Connecting…' : 'Test connection'}}</button>@if(databaseOk()){<span class="ok">✓ Connected to {{databaseOk()}}</span>}</div>
+              <p class="fine">Keystone creates its tables, copies what setup has stored so far, saves <code>storage.database-url</code> to <code>{{status()?.configFile}}</code> (readable only by Keystone) and restarts.</p>
+            </div>
+          }
+        }
+        <div class="actions"><button class="quiet" (click)="step.set('signin')">Back</button><button class="primary" [disabled]="engine()==='mysql' && !databaseOk()" (click)="step.set('finish')">Continue</button></div>
+      }
+      @case('finish'){
+        @if(restarting()){
+          <div class="restarting"><span class="spinner"></span><h2>Restarting Keystone…</h2><p class="lead">Applying your settings. This page continues by itself.</p></div>
+        } @else {
+          <p class="eyebrow">Step 5 of 5</p><h2>Review and finish</h2>
+          <dl class="summary">
+            <dt>License</dt><dd>{{status()?.licenseId}} accepted</dd>
+            <dt>Portal SSO</dt><dd>@if(usePortal()){<code>{{portalUrl()}}</code> · client <code>{{clientId()}}</code>}@else{Not used}</dd>
+            <dt>Local accounts</dt><dd>@if(useLocal()){@if(existingAdmins()>0){Existing administrators}@else{Administrator <code>{{adminEmail()}}</code>}}@else{Not used}</dd>
+            <dt>Database</dt><dd>@if(engine()==='mysql'){MySQL at <code>{{mysql().host}}:{{mysql().port}}/{{mysql().database}}</code>}@else{Built-in SQLite}</dd>
+          </dl>
+          <div class="notice"><strong>Back up the master key</strong> (<code>secrets/master.key</code> in the Keystone home) somewhere other than this server. Without it no stored secret can be recovered.</div>
+          <div class="actions"><button class="quiet" (click)="step.set('database')">Back</button><button class="primary" [disabled]="busy()" (click)="finish()">{{busy() ? 'Finishing…' : 'Finish setup'}}</button></div>
+        }
+      }
+      }
+    </section>
+  </div>
+</div>

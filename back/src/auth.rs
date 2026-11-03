@@ -40,6 +40,29 @@ pub async fn require_admin(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    if crate::setup::required(&state).await? {
+        return Err(crate::setup::required_error());
+    }
+    let token = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(unauthorized)?
+        .to_owned();
+    // Local accounts: an opaque session token instead of a Portal JWT.
+    if token.starts_with(crate::local_auth::TOKEN_PREFIX) {
+        let (claims, access) = crate::local_auth::authenticate(&state, &token).await?;
+        let actor = crate::client::Actor::new(
+            crate::vault::admin_subject(&claims),
+            &request,
+            state.config.trust_proxy,
+        );
+        request.extensions_mut().insert(actor);
+        request.extensions_mut().insert(access);
+        request.extensions_mut().insert(claims);
+        return Ok(next.run(request).await);
+    }
     if !state.config.sso_configured() {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -47,12 +70,7 @@ pub async fn require_admin(
             "Portal SSO is not configured",
         ));
     }
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(unauthorized)?;
+    let token = token.as_str();
     if token.len() > 16384 {
         return Err(unauthorized());
     }
@@ -123,6 +141,9 @@ pub async fn require_admin(
         state.config.trust_proxy,
     );
     request.extensions_mut().insert(actor);
+    request
+        .extensions_mut()
+        .insert(Access::from_roles(&claims.roles));
     request.extensions_mut().insert(claims);
     Ok(next.run(request).await)
 }
@@ -152,12 +173,72 @@ pub fn validate_token(
     if claims.sub.is_empty() || !has_openid {
         return Err(unauthorized());
     }
-    if !claims.roles.iter().any(|role| role == "ROLE_ADMIN") {
+    if !Access::from_roles(&claims.roles).any() {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "admin_required",
-            "Portal administrator access is required",
+            "Portal administrator access (or a ROLE_VAULT_<APP> role) is required",
         ));
     }
     Ok(claims)
+}
+
+/// What a signed-in person may manage, from their Portal SSO roles:
+/// `ROLE_ADMIN` manages everything; `ROLE_VAULT_ORDERS_SERVICE` manages only `orders-service`.
+#[derive(Clone, Debug, Default)]
+pub struct Access {
+    pub admin: bool,
+    pub apps: Vec<String>,
+}
+
+pub const VAULT_ROLE_PREFIX: &str = "ROLE_VAULT_";
+
+/// `orders-service` → `ROLE_VAULT_ORDERS_SERVICE`, the Portal role to create for app owners.
+pub fn app_role(app: &str) -> String {
+    format!(
+        "{VAULT_ROLE_PREFIX}{}",
+        app.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+impl Access {
+    pub fn from_roles(roles: &[String]) -> Self {
+        Self {
+            admin: roles.iter().any(|r| r == "ROLE_ADMIN"),
+            apps: roles
+                .iter()
+                .filter_map(|r| r.strip_prefix(VAULT_ROLE_PREFIX))
+                .filter(|r| !r.is_empty())
+                .map(|r| r.to_ascii_lowercase().replace('_', "-"))
+                .collect(),
+        }
+    }
+    pub fn any(&self) -> bool {
+        self.admin || !self.apps.is_empty()
+    }
+    pub fn can(&self, app: &str) -> bool {
+        self.admin || self.apps.iter().any(|a| a == app)
+    }
+    pub fn require(&self, app: &str) -> Result<(), ApiError> {
+        if self.can(app) {
+            Ok(())
+        } else {
+            Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "app_forbidden",
+                "Your Portal roles do not include this application",
+            ))
+        }
+    }
+    pub fn require_admin(&self) -> Result<(), ApiError> {
+        if self.admin {
+            Ok(())
+        } else {
+            Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "admin_required",
+                "Only Portal administrators can do this",
+            ))
+        }
+    }
 }

@@ -2,17 +2,17 @@
   <img src="ui/public/logo.svg" width="96" height="96" alt="Keystone logo" />
 </p>
 
-<h1 align="center">Keystone</h1>
+<h1 align="center">Keystone Vault</h1>
 
 <p align="center">
-  <strong>Secrets and configuration vault for the Portal suite, with a Portal SSO-protected admin console.</strong><br />
-  Rust backend. Angular console. Encrypted keys and whole config files that apps load at startup.
+  <strong>Encrypted secrets and configuration for the Portal SSO suite.</strong><br />
+  One executable with its console built in. Apps load their keys and whole <code>.properties</code> files at startup.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-Backend-047857?logo=rust&amp;logoColor=white" alt="Rust backend" />
+  <img src="https://img.shields.io/badge/Rust-single_binary-047857?logo=rust&amp;logoColor=white" alt="Rust single binary" />
   <img src="https://img.shields.io/badge/Angular-21-059669?logo=angular&amp;logoColor=white" alt="Angular 21" />
-  <img src="https://img.shields.io/badge/SQLite-Storage-065F46?logo=sqlite&amp;logoColor=white" alt="SQLite storage" />
+  <img src="https://img.shields.io/badge/AES--256--GCM-envelope_encryption-065F46" alt="AES-256-GCM" />
   <img src="https://img.shields.io/badge/Portal_SSO-PKCE-047857" alt="Portal SSO with PKCE" />
 </p>
 
@@ -20,116 +20,168 @@
 
 ## What you get
 
-- **Keystone Vault:** per-application encrypted secrets, stored as individual keys or as whole files (`.properties`, YAML, JSON, certificates). Includes `default`-inherited environments, version history with rollback, `.properties`/`.env` import and export, and a mandatory audit trail. See [docs/VAULT.md](docs/VAULT.md).
-- **Startup loading for every app:** a Spring Cloud Config-compatible endpoint (Spring Boot apps such as Portal need no custom code), plus JSON, `.properties`, dotenv and shell formats. Each app authenticates with a read-only token scoped to one environment.
-- **Portal-native:** vault application ids are Portal `client_id`s, administrators sign in with Portal SSO, and Portal's App Connect recognizes the `keystone` product.
-- **Admin console:** Portal SSO-styled workspace with an emerald accent, plus built-in docs at `/docs`.
-- **Portal SSO:** popup sign-in with PKCE and session refresh; every admin API requires a verified access token and the administrator role.
-- **Blog reactions:** persistent likes and daily unique views, with duplicate-safe retries and per-post activity totals.
-- **Graceful outages:** the portfolio remains readable when Keystone is unavailable and displays a small retry message.
-- **Single monorepo:** the Rust server serves the compiled Angular UI and same-origin APIs, backed by SQLite.
+- **Secrets as keys or whole files.** Store individual keys or whole files (`application.properties`, YAML, JSON, certificates) per application and per environment. Environments inherit from `default`, every write is versioned with rollback, and `.properties`/`.env` files can be imported and exported.
+- **Loads at startup, everywhere.** A Spring Cloud Config-compatible endpoint means Spring Boot apps, Portal included, need no code. There is also JSON, `.properties`, dotenv and shell output, and `keystone run -- <your app>` for any language. Live reload works through ETags and a watch endpoint.
+- **Least privilege.** Each app gets a read-only token for one environment, optionally limited to its servers' IP addresses. Repeated failed attempts lock the IP address out.
+- **Two-person control.** Protected environments turn every change into a change request that a second administrator approves. Compare & promote copies values between environments without revealing them.
+- **Sign in your way.** Use Portal SSO (PKCE), Keystone's own email-and-password accounts, or both, for a break-glass administrator when Portal is down. Roles are the same either way: `ROLE_ADMIN` manages everything, and `ROLE_VAULT_<APP>` lets a team manage only its own application.
+- **SQLite or MySQL.** The built-in SQLite needs nothing installed. MySQL 8+ / MariaDB is chosen in the setup wizard or moved to later with `keystone migrate`, with every secret, user and audit record intact.
+- **Audit and alerts.** Every pull, reveal and change is recorded with who, when, IP and client, with filters and CSV export. Slack, Teams or webhook alerts fire for refused tokens, deletions, pending approvals and more. Health checks rank what to fix.
+- **Easy to run.** One binary (or container) and one commented `keystone.properties`. The master key is generated on first start. Automatic encrypted backups, verified restore, and master-key rotation without re-encrypting anything.
 
 ---
 
-## Layout
+## Quick start
+
+```bash
+# Linux / macOS: downloads the latest release and verifies its checksum
+curl -fsSL https://raw.githubusercontent.com/tanmaysinghx/keystone-vault/main/install.sh | bash
+
+keystone          # prints a one-time setup key; open http://127.0.0.1:8090
+```
+
+The console opens on **first-time setup**, the same flow as Portal SSO's:
+
+1. **License**: review and accept the Apache License 2.0.
+2. **Setup key**: paste the key Keystone printed (also in `~/.keystone/secrets/setup.key`). It proves you control the server.
+3. **Sign-in**: Portal SSO, a local administrator (email and password), or both.
+4. **Database**: keep the built-in SQLite, or enter MySQL details and test the connection.
+5. **Finish**: Keystone saves your choices to `keystone.properties` and restarts itself.
+
+On first start Keystone creates `~/.keystone/` with the database, `keystone.properties` (every option, commented out) and a generated master key in `secrets/master.key`. **Back that key up somewhere else.** Data backups never include it, and without it nothing can be decrypted.
+
+<details>
+<summary><strong>Unattended (CI, Kubernetes, scripted installs)</strong></summary>
+
+Skip the wizard with configuration. `KEYSTONE_SETUP_ACCEPT_LICENSE=true` means you accept the Apache-2.0 license. Add Portal SSO (`KEYSTONE_PORTAL_URL`, `KEYSTONE_PORTAL_CLIENT_ID`) and/or a first local administrator (`KEYSTONE_BOOTSTRAP_ADMIN_EMAIL`, `KEYSTONE_BOOTSTRAP_ADMIN_PASSWORD`; remove the password after the first sign-in), and optionally `KEYSTONE_STORAGE_DATABASE_URL=mysql://…`.
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+```bash
+docker run -d --name keystone -p 8090:8090 -v keystone-data:/var/lib/keystone \
+  ghcr.io/tanmaysinghx/keystone-vault:latest
+docker logs keystone        # the setup key
+```
+
+Or `docker compose up -d` with [compose.yaml](compose.yaml), and `--profile mysql` for a MySQL container next to it. The image is distroless, runs as non-root, and health-checks itself.
+</details>
+
+<details>
+<summary><strong>Linux service (systemd)</strong></summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tanmaysinghx/keystone-vault/main/install.sh | sudo bash -s -- --service
+sudo nano /etc/keystone/keystone.properties && sudo systemctl restart keystone
+```
+
+The data is in `/var/lib/keystone` and the unit is [distribution/keystone.service](distribution/keystone.service), which is sandboxed.
+</details>
+
+<details>
+<summary><strong>From source</strong></summary>
+
+Requires Rust and Node 22.12+ or 24. `./build.sh` produces `target/release/keystone` with the console embedded.
+</details>
+
+## Configuration: one file
+
+Everything lives in **`keystone.properties`** ([template](back/keystone.properties.template)). Uncomment what you need and restart. Precedence, highest first:
+
+1. command line: `keystone --server.port=9000` (Portal-style `--httpPort=9000` also works)
+2. environment: `KEYSTONE_SERVER_PORT=9000` (any key, upper case, with `.` and `-` replaced by `_`)
+3. the file: `~/.keystone/keystone.properties`, or `--config=/etc/keystone/keystone.properties`
+4. built-in defaults
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `server.address` / `server.port` | `127.0.0.1` / `8090` | Listen address (`0.0.0.0` in containers) |
+| `server.trust-proxy` | `false` | Take client IPs from `X-Forwarded-For` behind your reverse proxy |
+| `auth.local` | `false` (set by setup) | Email + password accounts, managed in **Settings → Users** |
+| `portal.url` / `portal.client-id` | none | Portal SSO issuer and public client (setup or `keystone connect-portal` sets both) |
+| `vault.master-key-file` / `vault.master-key` | `secrets/master.key` (generated) | The key that wraps every application key |
+| `storage.database-url` | `<home>/data/keystone.db` | SQLite, or `mysql://user:pass@host:3306/keystone?ssl-mode=required` |
+| `backup.interval-hours` / `backup.keep` / `backup.dir` | `24` / `14` / `<home>/backups` | Automatic encrypted snapshots |
+| `security.failed-token-limit` / `security.lockout-minutes` | `10` / `15` | IP lockout after failed token attempts |
+| `security.rotation-days` / `security.token-expiry-warning-days` | `90` / `14` | Health-check thresholds |
+| `alerts.webhook-url` | none (or set in Settings) | Slack / Teams / JSON webhook |
+| `log.level` | `info` | Log filter |
+
+`keystone config` prints the effective configuration with secrets redacted. Legacy variables such as `PORTAL_URL` and `KEYSTONE_MASTER_KEY` still work.
+
+## Loading secrets in an app
+
+Create the application in the console, using its Portal `client_id`. Add keys or upload its `application.properties` per environment, then issue a token. The app needs only `KEYSTONE_URL` and `KEYSTONE_TOKEN`:
+
+```properties
+# Spring Boot: add spring-cloud-starter-config, then
+spring.application.name=orders-service
+spring.config.import=configserver:
+spring.cloud.config.uri=${KEYSTONE_URL}/config
+spring.cloud.config.username=keystone
+spring.cloud.config.password=${KEYSTONE_TOKEN}
+spring.cloud.config.fail-fast=true
+```
+
+```bash
+keystone run -- node server.js            # any language: every key becomes an env variable
+keystone pull --format=properties --out=config/application.properties
+```
+
+[examples/spring-boot](examples/spring-boot) is a complete app that CI starts against a real Keystone on every push. Full guides are in the built-in docs at **`/docs`** (also at [docs/VAULT.md](docs/VAULT.md)).
+
+## Operating it
+
+| Task | How |
+| --- | --- |
+| Back up now / restore | `keystone backup` · `keystone restore FILE` (stop the server first; the key is verified before anything changes) |
+| Move to MySQL | `keystone migrate --to mysql://…` (stop the server first; copies everything and updates the config) |
+| Add a local user | **Settings → Users** (local accounts) |
+| Rotate the master key | `keystone rotate-master-key` (stop the server first; re-wraps app keys and keeps the old key as `master.key.retired-*`) |
+| Let a team manage its app | Create `ROLE_VAULT_<APP>` in Portal (shown in the app's ⋯ menu) and assign it |
+| Require approval in prod | App ⋯ menu → **Protect prod**; changes then wait in **Security → Approvals** |
+| See who pulled secrets | **Security → Audit log** (IP, client, time; CSV export) |
+| What needs attention | **Security → Health checks** |
+| Alerts | **Settings → Alerts** (Slack / Teams webhook) |
+
+## Pipeline, releases and tags
+
+Modelled on Portal SSO's ([.github/workflows](.github/workflows)):
+
+| Stage | Proves |
+| --- | --- |
+| 1 · Build & test | `cargo fmt`, `clippy -D warnings`, all backend tests on **SQLite and on MySQL 8.4** (count asserted), console unit tests and build |
+| 2 · Static analysis | CodeQL (Rust and TypeScript, security-extended), `cargo audit`, `npm audit` |
+| 3 · Package | Release binary smoke test (first start, setup wizard over the API with in-place restart, local sign-in, embedded console, backup, key rotation); container builds, runs non-root and becomes healthy; a real Spring Boot app loads its `qa` configuration, refuses a wrong token, and `keystone pull`/`run` work |
+| 4 · Gate | One required status check |
+| 5 · Release | Every green push to `main` is tagged **`v1.0.<run number>`**, with binaries for Linux (x86_64, arm64), macOS (Apple silicon, Intel) and Windows, `SHA256SUMS`, and a multi-arch image `ghcr.io/tanmaysinghx/keystone-vault:<version>` / `:latest` |
+
+For a hand-picked version, push a tag (`git tag v1.2.0 && git push origin v1.2.0`) or run **Release** from the Actions tab. Dependabot opens grouped weekly updates for Cargo, npm, Maven, Actions and Docker.
+
+## Development
+
+```bash
+npm --prefix ui ci && npm run build:ui   # console (embedded into the binary at build time)
+cargo run -p keystone                    # http://localhost:8090, reads .env in a checkout
+npm run dev:ui                           # console with live reload on :4300 (register that origin in Portal)
+npm run check && npm run test:back && npm --prefix ui test
+```
 
 ```text
-back/                 Rust / Axum API, SQLx migrations, integration tests
-ui/                   Angular standalone admin console
-packages/portal-sso/  Pinned official Portal browser SDK source snapshot
-scripts/              Local setup and Portal onboarding helpers
-docs/                 API and registration reference
-data/                 SQLite database (ignored; persists across restarts)
+back/                 Rust server and CLI: vault, approvals, backups, alerts, insights, migrations, tests
+ui/                   Angular console and docs (/docs)
+examples/spring-boot/ Reference Spring Boot client (exercised by CI)
+distribution/         systemd unit
+packages/portal-sso/  Pinned Portal browser SDK snapshot
 ```
 
-## Run locally
+<details>
+<summary><strong>Legacy: Selfie Portfolio blog reactions</strong></summary>
 
-Requires Rust, Node 22.12+ or 24, npm, and the platform C/C++ build tools for SQLite. Run commands from this directory. Use `npm.cmd` in Windows PowerShell if execution policy blocks `npm`.
+Keystone still serves the portfolio's like and view counters at `/api/v1/blog/stats`, protected by `blog.service-key` (`KEYSTONE_SERVICE_KEY`). `node scripts/configure-local.mjs` links the sibling `selfie-portfolio` checkout with a random shared key. The portfolio's server-side `/api/stats` gateway calls Keystone, and the key never reaches the browser. Visitor IDs are hashed, and one like per visitor/post and one view per visitor/post/UTC day are enforced atomically.
+</details>
 
-```sh
-npm --prefix ui ci
-npm run build:ui
-cargo run -p keystone
-```
+## License
 
-Open **http://localhost:8090**. The Rust server serves the built Angular UI and same-origin APIs. The UI is a public sign-in shell; every admin API validates the access token and requires `ROLE_ADMIN`. There is no development auth bypass.
-
-For UI development, run `npm run dev:ui` in another terminal (port 4300). The proxy targets the Rust server. Register `http://localhost:4300` with the same public Portal client before using sign-in from this additional origin. Use port 8090 for the already-onboarded local application.
-
-For a release build: `npm run build:ui` then `npm run build:back`. Ship the executable together with `ui/dist/keystone-ui/browser`, configure environment variables, and run from the repository/package root. `KEYSTONE_UI_DIR` can point to a different absolute UI directory.
-
-## Configuration
-
-The server reads `.env` in its working directory. `.env.example` lists setting names without credentials. Actual `.env` files are ignored.
-
-| Setting | Meaning / default |
-| --- | --- |
-| `KEYSTONE_BIND` | `127.0.0.1:8090`; use a deliberate interface behind your HTTPS reverse proxy |
-| `KEYSTONE_DATABASE_URL` | `sqlite://data/keystone.db`; migrations run at startup |
-| `KEYSTONE_UI_DIR` | `ui/dist/keystone-ui/browser` |
-| `KEYSTONE_SERVICE_KEY` | At least 32 characters; required for server-to-server blog API access |
-| `KEYSTONE_MASTER_KEY` | 32 bytes, base64 (`openssl rand -base64 32`). Wraps each vault application's data key. Unset: the vault is sealed. **Back it up separately from the database**; it cannot be recovered |
-| `KEYSTONE_TRUST_PROXY` | `false`. Set `true` only behind a reverse proxy, so audit records the client IP from `X-Forwarded-For` instead of the proxy's |
-| `PORTAL_URL` | Exact verified issuer, no trailing slash |
-| `PORTAL_CLIENT_ID` | Registered **public** OAuth client ID |
-| `RUST_LOG` | Rust log filter; defaults to Keystone + request tracing |
-
-Missing SSO settings leave all admin routes locked. Missing the service key leaves blog routes locked. A missing master key leaves the vault sealed.
-
-## Portal SSO
-
-The local application has been connected to **https://portal.tanmaysinghx.com** using Portal's native admin-approved onboarding flow. The resulting public client ID is `keystone` and the app URL is `http://localhost:8090`. These non-secret facts do not replace the environment settings.
-
-The SDK uses authorization code + PKCE S256, the Portal-hosted popup callback, and rotating refresh tokens. Rust verifies RS256 signatures from `/oauth2/jwks`, exact issuer, audience, expiry, not-before, access-token scope, and `ROLE_ADMIN`. ID tokens are not accepted as API credentials. Public keys are cached for five minutes and unknown-key refresh attempts are throttled. Unverifiable identity fails closed.
-
-For another deployment, onboard its **actual URL** in Portal and use the returned registration; do not reuse the localhost URL in production. `docs/portal-onboarding.example.json` illustrates the registration request. For a manual restricted catalog entry, populate `application.roleIds` with Portal's actual `ROLE_ADMIN` role UUID. Do not invent that UUID. Keystone enforces the admin role regardless of catalog visibility.
-
-For the local native connection helper, stop Keystone first, then run:
-
-```sh
-node scripts/connect-portal.mjs https://portal.tanmaysinghx.com
-```
-
-It temporarily listens on port 8090, prints an approval URL, redeems the admin-approved code with its in-memory verifier, and saves only issuer/client ID. Reconnecting an existing Portal app can rotate its credentials; use this only when onboarding/reconnecting intentionally. The helper exits after success or 30 minutes. No Portal password or private client secret is copied into this app.
-
-Sign out clears Keystone's local session. It does **not** sign the user out of all Portal applications. The SDK snapshot and its upstream commit are documented in `packages/portal-sso/UPSTREAM.md`.
-
-## Connect Selfie Portfolio
-
-From Keystone, `node scripts/configure-local.mjs` links the sibling `selfie-portfolio` project using a random shared server key. It preserves existing keys and refuses to overwrite mismatched credentials. This has been run for this checkout.
-
-In the portfolio's `.env.local` (or Vercel server environment), configure `KEYSTONE_URL` and the same `KEYSTONE_SERVICE_KEY`. Neither belongs in Angular/browser configuration. The portfolio's `/api/stats` gateway forwards to `/api/v1/blog/stats` with a 2.5-second timeout.
-
-To run the portfolio locally with the gateway:
-
-```sh
-cd ../selfie-portfolio
-npm run blog
-npm run start:keystone
-```
-
-Open http://localhost:4200. Plain `npm start` does not run Vercel functions; it deliberately shows the reactions-unavailable notice if the gateway is absent. In production, `KEYSTONE_URL` must point to a deployed HTTPS endpoint reachable by Vercel, not localhost.
-
-The gateway sets an opaque HttpOnly, SameSite visitor cookie and never stores raw IPs. Keystone hashes that visitor ID and enforces a unique database key: one like per visitor/post and one view per visitor/post/UTC day. Concurrent retries cannot increment twice. This is anonymous browser-level deduplication, **not** proof of a unique person. Clearing cookies creates another visitor; use reverse-proxy/WAF rate limits before public exposure.
-
-The Angular blog only remembers likes after a confirmed response. If Keystone is unavailable, reading and navigation keep working, counts are not replaced with fake zeros, and a small retry message appears. A timed-out write may already have committed; retries use the same visitor identity.
-
-The former Upstash counters are not automatically migrated or deleted. Keystone starts a new dataset, and a distinct local liked key avoids carrying forward unconfirmed legacy likes. Back up/export old counters before any planned migration.
-
-## Checks
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-npm --prefix ui test
-npm --prefix ui run build
-```
-
-From the portfolio, run `npm run test:stats`, `npm test -- --watch=false`, and `npm run build`.
-
-## Operational boundaries
-
-This initial version uses one SQLite database with WAL and migrations; run one backend instance on durable local storage. Do not put the database on an ephemeral serverless filesystem or run independent replicas with divergent databases. Back up SQLite using its supported backup mechanism, including a restore drill. For multiple writers/instances, plan a PostgreSQL migration.
-
-Expose the server through HTTPS with request/rate limits and a durable volume. API bodies are limited to 16 KiB (1 MiB on vault admin routes, for file uploads); the portfolio gateway limits requests to 2 KiB. Secrets and bearer tokens are not logged. Portal role changes take effect when a new token is issued or an old token expires; no immediate revocation/introspection workflow is implemented in this first version.
+Keystone Vault is licensed under the [Apache License 2.0](LICENSE), the same license as Portal SSO. The setup wizard asks you to accept it once and records when, and from where, it was accepted.

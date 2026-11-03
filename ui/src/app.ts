@@ -2,16 +2,20 @@ import { Component, ElementRef, HostListener, OnInit, computed, inject, signal, 
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
-import { Api, Admin, AuthConfig, VaultApp } from './api';
+import { Api, Admin, AuthConfig, Insights, VaultApp } from './api';
 import { VaultComponent } from './vault';
 import { AuditComponent } from './audit';
+import { HealthComponent } from './health';
+import { ApprovalsComponent } from './approvals';
+import { SettingsComponent } from './settings';
 import { DocsComponent } from './docs';
-import { VaultStore } from './vault-store';
+import { SetupComponent } from './setup';
+import { VaultStore, View } from './vault-store';
 import { DOC_GUIDES } from './docs-content';
 
 interface SearchResult { group: string; label: string; detail: string; run: () => void }
 
-@Component({selector:'app-root',standalone:true,imports:[CommonModule,VaultComponent,AuditComponent,DocsComponent],templateUrl:'./app.html'})
+@Component({selector:'app-root',standalone:true,imports:[CommonModule,SetupComponent,VaultComponent,AuditComponent,HealthComponent,ApprovalsComponent,SettingsComponent,DocsComponent],templateUrl:'./app.html'})
 export class AppComponent implements OnInit {
   private api=inject(Api);
   private http=inject(HttpClient);
@@ -24,11 +28,27 @@ export class AppComponent implements OnInit {
   readonly error=signal('');
   readonly busy=signal(false);
   readonly starting=signal(true);
+  readonly email=signal('');
+  readonly pw=signal<{current:string;next:string;confirm:string}|null>(null);
+  readonly pwDone=signal('');
+  isLocal():boolean {return this.api.isLocal();}
+  async changePassword():Promise<void> {
+    const f=this.pw(); if(!f)return;
+    if(f.next!==f.confirm){this.pwDone.set('The new passwords do not match.');return;}
+    try {await this.api.send('POST','/api/v1/auth/local/password',{current:f.current,next:f.next});this.pw.set(null);this.logout();this.error.set('Password changed. Sign in with the new password.');}
+    catch(error){this.pwDone.set(error instanceof HttpErrorResponse&&typeof error.error?.error?.message==='string'?error.error.error.message:'The password could not be changed.');}
+  }
+  readonly password=signal('');
   readonly menuOpen=signal(false);
   /** Console screen: the vault workspace or the audit log (#audit). */
-  readonly view=signal<'vault'|'audit'>(typeof location!=='undefined'&&location.hash==='#audit'?'audit':'vault');
-  show(view:'vault'|'audit'):void {this.view.set(view);this.menuOpen.set(false);history.replaceState(null,'',view==='audit'?'#audit':location.pathname);}
-  openApp(id:string,env?:string,item?:import('./api').VaultItem):void {this.show('vault');this.store.select(id,env,item);}
+  readonly view=this.store.view;
+  show(view:View):void {this.menuOpen.set(false);this.store.show(view);}
+  openApp(id:string,env?:string,item?:import('./api').VaultItem):void {this.menuOpen.set(false);this.store.select(id,env,item);}
+  private badgeTimer?:ReturnType<typeof setInterval>;
+  /** Sidebar badges: health findings worth acting on, and changes waiting for approval. */
+  async refreshBadges():Promise<void> {
+    try {const r=await this.api.get<Insights>('/api/v1/admin/vault/insights');this.store.badges.set({health:r.counts.high+r.counts.medium,approvals:r.counts.pendingApprovals});}catch{/* badges are best effort */}
+  }
   readonly search=signal('');
   readonly active=signal(0);
   private searchBox=viewChild<ElementRef<HTMLInputElement>>('searchBox');
@@ -43,7 +63,8 @@ export class AppComponent implements OnInit {
     }
     const current=this.store.selectedId();
     if(current)for(const item of this.store.items())if(hit(item.name))out.push({group:item.kind==='key'?'Keys':'Files',label:item.name,detail:`${current} / ${this.store.env()} · v${item.version}`,run:()=>this.openApp(current,this.store.env(),item)});
-    if(hit('audit log','activity','who pulled','ip address'))out.unshift({group:'Screens',label:'Audit log',detail:'Every pull, reveal and change',run:()=>this.show('audit')});
+    const screens:[View,string,string,string[]][]=[['audit','Audit log','Every pull, reveal and change',['audit','activity','who pulled','ip']],['health','Health checks','What to fix',['health','checks','expiring','stale','rotation']],['approvals','Approvals','Changes waiting for a second administrator',['approval','approve','pending','protected']],['settings','Settings','Alerts, backups, master key',['settings','backup','alert','webhook','master key','slack']]];
+    for(const [view,label,detail,words] of screens)if((view!=='settings'||this.store.isAdmin())&&(hit(label)||words.some(w=>w.includes(q)||q.includes(w))))out.unshift({group:'Screens',label,detail,run:()=>this.show(view)});
     for(const g of DOC_GUIDES)if(hit(g.title,g.summary))out.push({group:'Docs',label:g.title,detail:g.group,run:()=>window.open(`/docs/${g.id}`,'_blank','noopener')});
     return out.slice(0,12);
   });
@@ -68,10 +89,23 @@ export class AppComponent implements OnInit {
   async initialize():Promise<void> {
     this.starting.set(true);this.error.set('');
     try {
-      this.config.set(await this.api.configure());
-      if(this.api.sso?.getCurrentUser()) await this.authorize();
+      const config=await this.api.configure();
+      this.config.set(config);
+      if(config.setupRequired)return;
+      if(this.api.isLocal()||this.api.sso?.getCurrentUser()) await this.authorize();
     } catch(error) {this.error.set(this.message(error));}
     finally {this.starting.set(false);}
+  }
+  /** Local account: email and password. */
+  async loginLocal():Promise<void> {
+    if(this.busy()||!this.email().trim()||!this.password())return;
+    this.busy.set(true);this.error.set('');
+    try {await this.api.loginLocal(this.email().trim(),this.password());this.password.set('');await this.authorize();}
+    catch(error){
+      this.api.logout();this.admin.set(null);
+      this.error.set(error instanceof HttpErrorResponse&&typeof error.error?.error?.message==='string'?error.error.error.message:this.message(error));
+    }
+    finally{this.busy.set(false);}
   }
   async login():Promise<void> {
     if(!this.api.sso || this.busy())return;
@@ -82,12 +116,15 @@ export class AppComponent implements OnInit {
   }
   private async authorize():Promise<void> {
     try {
-      this.admin.set(await this.api.get<Admin>('/api/v1/auth/me'));
+      const me=await this.api.get<Admin>('/api/v1/auth/me');
+      this.admin.set(me);this.store.isAdmin.set(me.admin);
+      if(!me.admin&&this.store.view()==='settings')this.store.show('vault');
+      void this.refreshBadges();clearInterval(this.badgeTimer);this.badgeTimer=setInterval(()=>{if(!document.hidden)void this.refreshBadges();},60000);
       this.api.get<{items:VaultApp[]}>('/api/v1/admin/vault/apps').then(r=>{if(!this.store.apps().length)this.store.apps.set(r.items);}).catch(()=>{});
     }
     catch(error){if(error instanceof HttpErrorResponse && [401,403].includes(error.status))this.api.logout();throw error;}
   }
-  logout():void {this.menuOpen.set(false);this.api.logout();this.admin.set(null);this.busy.set(false);this.error.set('');}
+  logout():void {clearInterval(this.badgeTimer);this.menuOpen.set(false);this.api.logout();this.admin.set(null);this.busy.set(false);this.error.set('');}
   private message(error:unknown):string {
     if(error instanceof HttpErrorResponse){
       if(error.status===403)return 'Administrator access is required. Ask a Portal administrator to review your role.';

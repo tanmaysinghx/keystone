@@ -1,0 +1,8 @@
+# cargo audit exceptions. Each needs a reason that stays true; revisit when the dependency changes.
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071 (rsa, "Marvin" timing side channel). It affects RSA private-key decryption
+  # and signing. Keystone only verifies Portal SSO's RS256 access-token signatures with public keys
+  # (jsonwebtoken DecodingKey), so no private key operation exists to attack. No fixed rsa release.
+  "RUSTSEC-2023-0071",
+]

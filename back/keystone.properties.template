@@ -1,0 +1,102 @@
+# =====================================================================================
+#  Keystone Vault configuration
+# =====================================================================================
+#
+#  Everything here is optional. Out of the box Keystone Vault keeps its data in this
+#  folder (<keystone home>), generates its master key into secrets/master.key and
+#  listens on http://127.0.0.1:8090. Connect Portal SSO below to sign in.
+#
+#  Uncomment what you need and restart. Precedence, highest first:
+#    1. command line     keystone --server.port=9000   (or --httpPort=9000)
+#    2. environment      KEYSTONE_SERVER_PORT=9000     (any key: upper case, . and - become _)
+#    3. this file
+#    4. built-in defaults
+#  Use another file with:  keystone --config=/etc/keystone/keystone.properties
+#
+#  This file may hold secrets. Keep it readable by the service account only.
+# =====================================================================================
+
+
+# --- Server ----------------------------------------------------------------------------
+# Listen address. Use 0.0.0.0 in containers or behind a reverse proxy on another host.
+# server.address=127.0.0.1
+# server.port=8090
+# Behind a reverse proxy you control: take the client IP from X-Forwarded-For so the
+# audit log records the real caller. Never enable it when Keystone is reachable directly.
+# server.trust-proxy=false
+
+
+# --- Sign-in ---------------------------------------------------------------------------
+# The first-run setup wizard (open the console) sets these. Use Portal SSO, local accounts,
+# or both. Local accounts are email + password, managed under Settings -> Users.
+# auth.local=false
+# How long a local sign-in lasts, in hours.
+# auth.session-hours=12
+
+
+# --- Portal SSO -------------------------------------------------------------------------
+# The exact issuer (no trailing slash) and Keystone's public client id. The easiest way to
+# get both is:  keystone connect-portal https://sso.example.com
+# portal.url=https://sso.example.com
+# portal.client-id=keystone
+
+
+# --- Master key ------------------------------------------------------------------------
+# Wraps every application's data key. Generated into secrets/master.key on first start.
+# BACK IT UP SEPARATELY FROM THE DATA: without it no stored secret can ever be decrypted.
+# Give it inline (32 bytes, base64: openssl rand -base64 32) or point at a file, for
+# example a mounted Kubernetes/Docker secret. Rotate with:  keystone rotate-master-key
+# vault.master-key=
+# vault.master-key-file=/run/secrets/keystone-master-key
+
+
+# --- Database --------------------------------------------------------------------------
+# Built-in SQLite by default (<keystone home>/data/keystone.db): nothing to install, fine for a
+# team. For MySQL 8.0+ / MariaDB 10.6+, create an empty database and a user, then either pick
+# it in the setup wizard, or run  keystone migrate --to mysql://...  (copies existing data).
+# storage.database-url=sqlite:///var/lib/keystone/data/keystone.db
+# storage.database-url=mysql://keystone:change-me@db.example.com:3306/keystone
+# TLS to MySQL:  mysql://user:pass@host:3306/keystone?ssl-mode=required
+
+
+# --- Backups ---------------------------------------------------------------------------
+# Consistent snapshots of the database. Secrets stay encrypted inside them; the master
+# key is never included, so store the two in different places.
+# backup.dir=/var/lib/keystone/backups
+# Hours between automatic backups; 0 turns them off.
+# backup.interval-hours=24
+# How many automatic backups to keep.
+# backup.keep=14
+
+
+# --- Security --------------------------------------------------------------------------
+# Failed application-token attempts allowed per IP address before it is locked out.
+# security.failed-token-limit=10
+# security.lockout-minutes=15
+# Flag keys not changed for this many days in Security -> Health checks.
+# security.rotation-days=90
+# Flag tokens that expire within this many days.
+# security.token-expiry-warning-days=14
+
+
+# --- Alerts ----------------------------------------------------------------------------
+# Usually set in the console (Settings -> Alerts). A value here wins over the console.
+# Slack and Microsoft Teams incoming webhooks, or any endpoint that accepts JSON.
+# alerts.webhook-url=https://hooks.slack.com/services/...
+
+
+# --- Unattended setup (containers, automation) -----------------------------------------
+# Skip the setup wizard. Accepting means you agree to the license in LICENSE (Apache-2.0).
+# setup.accept-license=true
+# Create this first local administrator (and turn on local accounts) if none exists.
+# REMOVE both once you have signed in: anyone who can read this file knows the password.
+# bootstrap.admin-email=admin@example.com
+# bootstrap.admin-password=
+
+
+# --- Logging ---------------------------------------------------------------------------
+# log.level=info
+
+
+# --- Legacy: portfolio blog reactions API ----------------------------------------------
+# blog.service-key=

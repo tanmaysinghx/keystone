@@ -30,12 +30,13 @@ fn config() -> Config {
     Config {
         bind: "127.0.0.1:0".into(),
         database_url: "sqlite::memory:".into(),
-        ui_dir: "missing-test-ui".into(),
+        ui_dir: None,
         service_key: SERVICE_KEY.into(),
         portal_url: "https://portal.test".into(),
         client_id: "keystone-test".into(),
         master_key: None,
         trust_proxy: true,
+        ..Default::default()
     }
 }
 fn claims() -> Value {
@@ -52,7 +53,7 @@ fn token(claims: &Value) -> String {
     .unwrap()
 }
 async fn test_state() -> AppState {
-    let s = state(config()).await.unwrap();
+    let s = state(on_test_db(config()).await).await.unwrap();
     *s.keys.lock().await = KeyCache {
         keys: Some(SIGNER.1.clone()),
         fetched: Some(Instant::now()),
@@ -229,7 +230,7 @@ async fn invalid_input_and_unconfigured_services_fail_closed() {
     let mut cfg = config();
     cfg.client_id.clear();
     cfg.service_key.clear();
-    let app = router(state(cfg).await.unwrap());
+    let app = router(state(on_test_db(cfg).await).await.unwrap());
     for path in ["/api/v1/auth/me", "/api/v1/blog/stats?slug=test"] {
         assert_eq!(
             app.clone()
@@ -312,7 +313,7 @@ async fn token_relay_validates_and_forwards_public_pkce() {
     });
     let mut cfg = config();
     cfg.portal_url = origin.clone();
-    let app = router(state(cfg).await.unwrap());
+    let app = router(state(on_test_db(cfg).await).await.unwrap());
     for (form, header, expected) in [
         (
             format!(
@@ -366,4 +367,12 @@ async fn token_relay_validates_and_forwards_public_pkce() {
         }
     }
     upstream.abort();
+}
+
+/// In-memory SQLite, or a fresh MySQL database when KEYSTONE_TEST_MYSQL_URL is set (CI).
+async fn on_test_db(mut config: Config) -> Config {
+    if config.database_url == "sqlite::memory:" {
+        config.database_url = keystone::db::test_url().await;
+    }
+    config
 }

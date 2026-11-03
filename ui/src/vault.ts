@@ -9,7 +9,10 @@ interface Editor { name: string; value: string; isNew: boolean }
 interface History { kind: 'keys' | 'files'; name: string; versions: VaultVersion[] }
 interface Importer { format: 'properties' | 'env'; content: string; replace: boolean }
 interface NewApp { id: string; name: string; description: string; portalClientId: string; environments: string }
-interface TokenForm { name: string; environment: string; expiresInDays: number }
+interface TokenForm { name: string; environment: string; expiresInDays: number; allowedCidrs: string }
+interface AllowList { token: VaultToken; value: string }
+interface PromoteForm { from: string; diff: { item: string; status: string }[] | null; chosen: Record<string, boolean> }
+interface Pending { pendingApproval?: number | number[]; message?: string }
 interface Confirm { title: string; message: string; expect: string; typed: string; run: () => Promise<void> }
 
 const BASE = '/api/v1/admin/vault';
@@ -47,7 +50,11 @@ export class VaultComponent implements OnInit {
   readonly issued = signal<IssuedToken | null>(null);
   readonly confirm = signal<Confirm | null>(null);
   readonly newEnv = signal('');
-  readonly snippet = signal<'spring' | 'node' | 'shell' | 'file'>('spring');
+  readonly snippet = signal<'spring' | 'node' | 'shell' | 'cli' | 'reload' | 'file'>('spring');
+  readonly allowList = signal<AllowList | null>(null);
+  readonly promote = signal<PromoteForm | null>(null);
+  readonly protectedEnv = computed(() => this.selected()?.protectedEnvironments?.includes(this.env()) ?? false);
+  isProtected(env: string): boolean { return this.selected()?.protectedEnvironments?.includes(env) ?? false; }
 
   readonly selected = computed(() => this.apps().find(a => a.id === this.selectedId()) ?? null);
   readonly keyCount = computed(() => this.items().filter(i => i.kind === 'key').length);
@@ -63,6 +70,7 @@ export class VaultComponent implements OnInit {
       untracked(async () => {
         if (r.id !== this.selectedId() || (r.env && r.env !== this.env())) await this.select(r.id, r.env ?? 'default');
         if (r.item) { this.tab.set(r.item.kind === 'key' ? 'keys' : 'files'); this.filter.set(r.item.name); }
+        else if (r.tab) await this.chooseTab(r.tab);
       });
     });
     effect(() => { if (this.store.newAppRequests() > 0) untracked(() => this.openNewApp()); });
@@ -180,14 +188,15 @@ export class VaultComponent implements OnInit {
     const name = form.name.trim();
     await this.run(async () => {
       if (form.isNew && this.items().some(i => i.kind === 'key' && i.name === name)) throw new Error(`“${name}” already exists in ${this.env()}. Edit it instead.`);
-      const result = await this.api.send<{ version: number }>('PUT', this.envPath('keys', enc(name)), { value: form.value });
+      const result = await this.api.send<{ version: number } & Pending>('PUT', this.envPath('keys', enc(name)), { value: form.value });
       this.editor.set(null); this.revealed.update(({ [name]: _, ...rest }) => rest);
-      await this.loadTab(); await this.refreshApps(); this.flash(`${name} saved as version ${result.version}.`);
+      await this.loadTab(); await this.refreshApps();
+      if (!this.pending(result)) this.flash(`${name} saved as version ${result.version}.`);
     });
   }
   askDelete(kind: 'keys' | 'files', name: string): void {
     this.confirm.set({ title: `Delete ${name}?`, message: `The ${kind === 'keys' ? 'key' : 'file'} and all of its versions are removed from ${this.env()}. Applications reading it will no longer receive it.`, expect: '', typed: '',
-      run: async () => { await this.api.send('DELETE', this.envPath(kind, enc(name))); await this.loadTab(); await this.refreshApps(); } });
+      run: async () => { const r = await this.api.send<Pending | null>('DELETE', this.envPath(kind, enc(name))); await this.loadTab(); await this.refreshApps(); this.pending(r); } });
   }
   async showHistory(kind: 'keys' | 'files', name: string): Promise<void> {
     await this.run(async () => {
@@ -198,9 +207,9 @@ export class VaultComponent implements OnInit {
   async rollback(version: number): Promise<void> {
     const history = this.history(); if (!history) return;
     await this.run(async () => {
-      const result = await this.api.send<{ version: number }>('POST', this.envPath(history.kind, enc(history.name), 'rollback'), { version });
+      const result = await this.api.send<{ version: number } & Pending>('POST', this.envPath(history.kind, enc(history.name), 'rollback'), { version });
       this.history.set(null); this.revealed.set({}); await this.loadTab();
-      this.flash(`Restored version ${version} of ${history.name} as version ${result.version}.`);
+      if (!this.pending(result)) this.flash(`Restored version ${version} of ${history.name} as version ${result.version}.`);
     });
   }
   async viewVersion(version: number): Promise<void> {
@@ -222,9 +231,9 @@ export class VaultComponent implements OnInit {
   async runImport(): Promise<void> {
     const form = this.importer(); if (!form) return;
     await this.run(async () => {
-      const r = await this.api.send<{ written: number; unchanged: number; removed: number }>('POST', this.envPath('import'), form);
+      const r = await this.api.send<{ written: number; unchanged: number; removed: number } & Pending>('POST', this.envPath('import'), form);
       this.importer.set(null); this.revealed.set({}); await this.loadTab(); await this.refreshApps();
-      this.flash(`Imported into ${this.env()}: ${r.written} written, ${r.unchanged} unchanged${r.removed ? `, ${r.removed} removed` : ''}.`);
+      if (!this.pending(r)) this.flash(`Imported into ${this.env()}: ${r.written} written, ${r.unchanged} unchanged${r.removed ? `, ${r.removed} removed` : ''}.`);
     });
   }
   async exportConfig(format: 'properties' | 'env'): Promise<void> {
@@ -241,8 +250,9 @@ export class VaultComponent implements OnInit {
     const name = file.name.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^\.+/, '');
     await this.run(async () => {
       if (file.size > 512 * 1024) throw new Error('Files are limited to 512 KiB.');
-      const result = await this.api.send<{ version: number }>('PUT', this.envPath('files', enc(name)), file, file.type || guessType(name));
-      await this.loadTab(); await this.refreshApps(); this.flash(`${name} stored as version ${result.version}.`);
+      const result = await this.api.send<{ version: number } & Pending>('PUT', this.envPath('files', enc(name)), file, file.type || guessType(name));
+      await this.loadTab(); await this.refreshApps();
+      if (!this.pending(result)) this.flash(`${name} stored as version ${result.version}.`);
     });
   }
   async download(name: string, version?: number): Promise<void> {
@@ -250,11 +260,20 @@ export class VaultComponent implements OnInit {
   }
 
   // ----- tokens
-  openTokenForm(): void { this.tokenForm.set({ name: `${this.selectedId()} ${this.env()}`, environment: this.env(), expiresInDays: 365 }); }
+  openTokenForm(): void { this.tokenForm.set({ name: `${this.selectedId()} ${this.env()}`, environment: this.env(), expiresInDays: 365, allowedCidrs: '' }); }
+  openAllowList(token: VaultToken): void { this.allowList.set({ token, value: token.allowedCidrs ?? '' }); }
+  async saveAllowList(): Promise<void> {
+    const form = this.allowList(); if (!form) return;
+    await this.run(async () => {
+      await this.api.send('PATCH', this.path('tokens', enc(form.token.id)), { allowedCidrs: form.value.trim() });
+      this.allowList.set(null); await this.loadTab();
+      this.flash(form.value.trim() ? `“${form.token.name}” now works only from ${form.value.trim()}.` : `“${form.token.name}” works from any address.`);
+    });
+  }
   async createToken(): Promise<void> {
     const form = this.tokenForm(); if (!form) return;
     await this.run(async () => {
-      const issued = await this.api.send<IssuedToken>('POST', this.path('tokens'), { name: form.name.trim(), environment: form.environment, expiresInDays: Number(form.expiresInDays) || 0 });
+      const issued = await this.api.send<IssuedToken>('POST', this.path('tokens'), { name: form.name.trim(), environment: form.environment, expiresInDays: Number(form.expiresInDays) || 0, allowedCidrs: form.allowedCidrs.trim() || null });
       this.tokenForm.set(null); this.issued.set(issued); await this.loadTab(); await this.refreshApps();
     });
   }
@@ -265,6 +284,50 @@ export class VaultComponent implements OnInit {
   async copy(text: string, what = 'Copied'): Promise<void> {
     try { await navigator.clipboard.writeText(text); this.flash(`${what} to the clipboard.`); }
     catch { this.error.set('The browser blocked clipboard access. Select the text and copy it manually.'); }
+  }
+
+  // ----- protection & promote
+  async setProtection(on: boolean): Promise<void> {
+    const env = this.env();
+    if (!on) {
+      this.confirm.set({ title: `Remove protection from ${env}?`, message: 'Changes to this environment will apply immediately, without a second administrator. This is audited and alerted.', expect: env, typed: '',
+        run: async () => { await this.api.send('PUT', this.envPath('protection'), { protected: false }); await this.refreshApps(); this.flash(`${env} is no longer protected.`); } });
+      return;
+    }
+    await this.run(async () => { await this.api.send('PUT', this.envPath('protection'), { protected: true }); await this.refreshApps(); this.flash(`${env} is protected: every change now needs another administrator's approval.`); });
+  }
+  openPromote(): void {
+    const from = this.selected()?.environments.find(e => e !== this.env() && e !== 'default') ?? 'default';
+    this.promote.set({ from, diff: null, chosen: {} }); void this.comparePromote();
+  }
+  async comparePromote(): Promise<void> {
+    const form = this.promote(); if (!form) return;
+    await this.run(async () => {
+      const r = await this.api.send<{ diff: { item: string; status: string }[] }>('POST', this.envPath('promote'), { from: form.from, dryRun: true });
+      const chosen: Record<string, boolean> = {};
+      for (const d of r.diff) if (d.status === 'added' || d.status === 'changed') chosen[d.item] = true;
+      this.promote.set({ ...form, diff: r.diff, chosen });
+    });
+  }
+  async applyPromote(): Promise<void> {
+    const form = this.promote(); if (!form) return;
+    const items = Object.entries(form.chosen).filter(([, on]) => on).map(([item]) => item);
+    await this.run(async () => {
+      const r = await this.api.send<{ copied: number; pendingApproval: number[] }>('POST', this.envPath('promote'), { from: form.from, items });
+      this.promote.set(null); await this.loadTab(); await this.refreshApps();
+      if (r.pendingApproval.length) { this.store.badges.update(b => ({ ...b, approvals: b.approvals + r.pendingApproval.length })); this.flash(`${r.pendingApproval.length} changes submitted for approval in ${this.env()}.`); }
+      else this.flash(`Copied ${r.copied} items from ${form.from} into ${this.env()}.`);
+    });
+  }
+  choose(item: string, on: boolean): void { this.promote.update(p => p && { ...p, chosen: { ...p.chosen, [item]: on } }); }
+  itemLabel(item: string): string { return item.replace(/^(key|file):/, ''); }
+  /** A protected environment answers 202 with a change request instead of applying. */
+  private pending(result: Pending | null | undefined): boolean {
+    const ids = result?.pendingApproval; if (ids === undefined) return false;
+    const count = Array.isArray(ids) ? ids.length : 1;
+    this.store.badges.update(b => ({ ...b, approvals: b.approvals + count }));
+    this.flash(`${this.env()} is protected: your change is waiting for another administrator in Approvals.`);
+    return true;
   }
 
   // ----- confirmation
@@ -301,6 +364,27 @@ for (const [key, value] of Object.entries(await response.json())) {
 set -eu
 eval "$(curl -fsS -H "Authorization: Bearer $KEYSTONE_TOKEN" '${url}/api/v1/vault/config?format=shell')"
 exec "$@"`,
+      cli: `# The keystone binary doubles as a client (same read-only token)
+export KEYSTONE_URL=${url} KEYSTONE_TOKEN=ksv_...
+
+# Start any app with every key as an environment variable
+keystone run -- java -jar ${app}.jar
+
+# Or write the configuration / a whole file to disk
+keystone pull --format=properties --out=config/application.properties
+keystone get file application.properties --out=config/application.properties
+keystone get key spring.datasource.password`,
+      reload: `// Reload without restarting: long-poll for a new version, then fetch again.
+// (Spring Boot: add spring-boot-starter-actuator and POST /actuator/refresh when it changes.)
+let version = null;
+for (;;) {
+  const r = await fetch(\`${url}/api/v1/vault/watch?timeout=30\${version ? '&version=' + version : ''}\`,
+    { headers: { Authorization: \`Bearer \${process.env.KEYSTONE_TOKEN}\` } });
+  const { version: latest, changed } = await r.json();
+  if (changed || version === null) applyConfig(await (await fetch('${url}/api/v1/vault/config',
+    { headers: { Authorization: \`Bearer \${process.env.KEYSTONE_TOKEN}\` } })).json());
+  version = latest;
+}`,
       file: `# Whole files, byte for byte (falls back to the default environment)
 curl -fsS -H "Authorization: Bearer $KEYSTONE_TOKEN" \\
   -o config/application.properties '${url}/api/v1/vault/files/application.properties'

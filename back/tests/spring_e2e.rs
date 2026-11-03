@@ -1,6 +1,7 @@
 //! Serves a seeded Keystone on a real port so a real Spring Boot client can be pointed at it.
 //! Opt-in: `cargo test -p keystone --test spring_e2e -- --ignored --nocapture`
-//! Prints the qa token to the file named by KEYSTONE_E2E_TOKEN_FILE, then serves for 180 seconds.
+//! Prints the qa token to the file named by KEYSTONE_E2E_TOKEN_FILE, then serves for
+//! KEYSTONE_E2E_SECONDS (default 180).
 use axum::{body::Body, http::Request};
 use base64::{
     Engine,
@@ -27,12 +28,13 @@ async fn serve_seeded_vault_for_spring_boot() {
     let config = Config {
         bind: "127.0.0.1:18093".into(),
         database_url: "sqlite::memory:".into(),
-        ui_dir: "missing".into(),
+        ui_dir: None,
         service_key: String::new(),
         portal_url: "https://portal.test".into(),
         client_id: "keystone-test".into(),
         master_key: keystone::config::master_key(&STANDARD.encode([9u8; 32])).unwrap(),
         trust_proxy: false,
+        ..Default::default()
     };
     let s = state(config).await.unwrap();
     *s.keys.lock().await = KeyCache {
@@ -128,7 +130,16 @@ async fn serve_seeded_vault_for_spring_boot() {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
-    let _ = tokio::time::timeout(Duration::from_secs(180), server).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(
+            std::env::var("KEYSTONE_E2E_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180),
+        ),
+        server,
+    )
+    .await;
     let response = audit_app
         .oneshot(call(
             "GET",

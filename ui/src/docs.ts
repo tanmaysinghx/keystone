@@ -19,9 +19,11 @@ export class DocsComponent implements OnInit, OnDestroy {
   readonly menuOpen = signal(false);
   private readonly guideId = signal(this.fromPath());
   readonly guide = computed<DocGuide>(() => DOC_GUIDES.find(g => g.id === this.guideId()) ?? DOC_GUIDES[0]);
-  readonly position = computed(() => DOC_GUIDES.indexOf(this.guide()));
-  readonly previous = computed(() => DOC_GUIDES[this.position() - 1] ?? null);
-  readonly next = computed(() => DOC_GUIDES[this.position() + 1] ?? null);
+  /** Reading order follows the sidebar: group by group. */
+  private readonly ordered = this.groups.flatMap(g => g.guides);
+  readonly position = computed(() => this.ordered.indexOf(this.guide()));
+  readonly previous = computed(() => this.ordered[this.position() - 1] ?? null);
+  readonly next = computed(() => this.ordered[this.position() + 1] ?? null);
   private readonly onPop = () => this.guideId.set(this.fromPath());
 
   ngOnInit(): void {

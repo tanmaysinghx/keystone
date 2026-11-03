@@ -31,8 +31,9 @@ Single-key and single-file reads try `E` first and fall back to `default`.
 
 ## 2. Identity and the Portal suite
 
-- **People:** administrators sign in with Portal SSO (PKCE popup). Every vault admin API needs a
-  verified Portal access token with `ROLE_ADMIN`.
+- **People:** sign in with Portal SSO (PKCE popup), with Keystone's local accounts (email and
+  password, `auth.local=true`), or both. Every admin API needs a verified Portal access token or a
+  local session (`kss_…`), plus `ROLE_ADMIN` or the application's `ROLE_VAULT_<APP>` role.
 - **Applications:** Portal SSO doesn't issue `client_credentials` tokens yet (see its
   `docs/ARCHITECTURE.md`, "Known gaps"). Apps therefore authenticate with Keystone access tokens,
   which an administrator issues in the Keystone console. Portal access tokens are never accepted
@@ -180,11 +181,27 @@ characters, no leading dot).
 - Values are never logged. The admin UI masks values until an administrator reveals them, and
   each reveal is audited.
 
+## 7. Access, approvals and operations
+
+| Feature | Summary |
+| --- | --- |
+| **Roles** | `ROLE_ADMIN` manages everything. `ROLE_VAULT_<APP>` (e.g. `ROLE_VAULT_ORDERS_SERVICE`) manages only that application. The role name is shown in the app's ⋯ menu. |
+| **Protected environments** | `PUT /apps/{app}/environments/{env}/protection {"protected": true}` (admins). Writes, deletes, rollbacks, imports and promotes become change requests (`202 {"pendingApproval": id}`); a different person approves with `POST /changes/{id}/approve`. |
+| **Promote** | `POST /apps/{app}/environments/{target}/promote {"from": "qa", "dryRun": true}` returns `added`/`changed`/`same`/`only-in-target` without values; without `dryRun`, it copies (or proposes) the chosen `items`. |
+| **Token IP allow-lists** | `allowedCidrs` on create, `PATCH /apps/{app}/tokens/{id}` later. Other addresses are refused and audited (`address not allowed`). |
+| **Lockout** | `security.failed-token-limit` failures per IP within `security.lockout-minutes` → 429 `too_many_attempts`. |
+| **Live reload** | `ETag` / `If-None-Match` → 304 on `/api/v1/vault/config`; `/api/v1/vault/watch?version=…&timeout=30` long-polls for changes. Spring's `version` field carries the same fingerprint. |
+| **Backups** | Automatic (`backup.interval-hours`, `backup.keep`), `POST/GET /backups`, `keystone backup`, `keystone restore FILE` (verifies the key first). |
+| **Master-key rotation** | `keystone rotate-master-key`: re-wraps application keys, snapshots first, keeps the retired key. A wrong key is refused at startup. |
+| **Alerts** | `alerts.webhook-url` or Settings → Alerts: refused tokens, lockouts, protected reveals, deletions, protection removed, approvals needed, audit exports, failed backups. |
+| **Health checks** | `GET /insights`: ranked findings with the place to fix each. |
+| **CLI** | `keystone pull`, `get key|file`, `run -- CMD`, `whoami` with `KEYSTONE_URL` / `KEYSTONE_TOKEN`. |
+
 ### Not yet implemented
 
-- Master-key rotation (re-wrapping data keys) and an external KMS. The schema keeps one wrapped
-  key per application, so rotation only needs to re-wrap those keys, not re-encrypt every value.
-- Per-application owners. Today every Portal `ROLE_ADMIN` manages every application.
+- An external KMS (AWS KMS, Vault Transit) as the master-key holder. Rotation already only
+  re-wraps per-application keys, so a KMS would wrap those instead of a local key.
 - Portal-issued machine identity (`client_credentials`). When Portal adds it, Keystone can accept
   Portal service tokens alongside `ksv_` tokens.
-- Rate limiting of failed token attempts. Put Keystone behind a reverse proxy or WAF with limits.
+- Lockout counters live in memory, per server process: they reset on restart and are not shared
+  between instances (Keystone runs as one instance on SQLite).

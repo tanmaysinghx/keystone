@@ -1,0 +1,60 @@
+# Keystone Vault: one container, one volume.
+#
+#   cp .env.example .env    # optional: Portal SSO issuer and client id
+#   docker compose up -d
+#   docker compose logs keystone        # first start: the setup key, and BACK UP the generated master key
+#
+# With MySQL instead of the built-in SQLite:
+#   docker compose --profile mysql up -d   (and set KEYSTONE_STORAGE_DATABASE_URL, see below)
+#
+# Everything is configurable with KEYSTONE_* variables (see keystone.properties for the list), or
+# mount a config file at /var/lib/keystone/keystone.properties.
+
+name: keystone-vault
+
+services:
+  keystone:
+    build:
+      context: .
+    image: ghcr.io/tanmaysinghx/keystone-vault:latest
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+        # Only when the mysql profile is enabled.
+        required: false
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${KEYSTONE_PORT:-8090}:8090"
+    volumes:
+      - keystone-data:/var/lib/keystone
+      # Better: keep the master key outside the data volume, e.g. a Docker secret.
+      # - ./secrets/master.key:/run/secrets/keystone-master-key:ro
+    environment:
+      KEYSTONE_PORTAL_URL: ${KEYSTONE_PORTAL_URL:-}
+      KEYSTONE_PORTAL_CLIENT_ID: ${KEYSTONE_PORTAL_CLIENT_ID:-keystone}
+      # Behind your reverse proxy, so the audit log records real client IPs:
+      KEYSTONE_SERVER_TRUST_PROXY: ${KEYSTONE_SERVER_TRUST_PROXY:-false}
+      # KEYSTONE_VAULT_MASTER_KEY_FILE: /run/secrets/keystone-master-key
+      # MySQL (with --profile mysql): the setup wizard can also switch to it and copy the data.
+      KEYSTONE_STORAGE_DATABASE_URL: ${KEYSTONE_STORAGE_DATABASE_URL:-}
+    stop_grace_period: 20s
+
+  mysql:
+    profiles: [mysql]
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: keystone
+      MYSQL_USER: keystone
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    volumes:
+      - keystone-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u keystone -p$$MYSQL_PASSWORD"]
+      interval: 5s
+      retries: 20
+
+volumes:
+  keystone-data:
+  keystone-mysql:

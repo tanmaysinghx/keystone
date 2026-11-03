@@ -131,3 +131,13 @@ tr.alert td{background:#fef2f2}
   .row-actions .icon-btn{opacity:1}.mask span{opacity:1}
   .modal .row{flex-direction:column;align-items:stretch}
 }
+.env.locked{display:inline-flex;align-items:center;gap:5px}
+.lock{width:12px;height:12px}
+.protected-note{display:flex;align-items:center;gap:8px;margin:8px 0 0;padding:8px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font-size:12px;color:#92400e}
+.protected-note svg{width:14px;height:14px;flex-shrink:0}
+.protected-note a{color:#92400e;font-weight:600}
+.warn-text{color:#b45309;font-weight:500}
+.diff-status{font-size:11px;font-weight:500;border-radius:999px;padding:2px 8px;background:var(--ink-100);color:var(--ink-600)}
+.diff-status[data-status=added]{background:var(--brand-50);color:var(--brand-700)}
+.diff-status[data-status=changed]{background:#fffbeb;color:#b45309}
+.dropdown button code{font-size:11px}

@@ -1,0 +1,34 @@
+name: Release
+
+# Manual releases. CI already releases every green push to main as v1.0.<run number>; use this
+# for a hand-picked version: push a tag (git tag v1.2.0 && git push origin v1.2.0) or run it from
+# the Actions tab.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the leading v (e.g. 1.2.0)
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          v="${{ github.event.inputs.version || github.ref_name }}"
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+  release:
+    needs: [version]
+    uses: ./.github/workflows/build-release.yml
+    with:
+      version: ${{ needs.version.outputs.version }}

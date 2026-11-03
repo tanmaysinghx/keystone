@@ -1,11 +1,16 @@
 {
-  "name": "keystone", "private": true, "version": "0.1.0",
+  "name": "keystone",
+  "private": true,
+  "version": "1.0.0",
   "scripts": {
+    "build": "./build.sh",
     "dev:back": "cargo run -p keystone",
     "dev:ui": "npm --prefix ui start",
     "build:ui": "npm --prefix ui run build",
     "build:back": "cargo build --release -p keystone",
     "test:back": "cargo test --workspace",
+    "test:ui": "npm --prefix ui test",
+    "test:spring": "cargo test -p keystone --test spring_e2e -- --ignored --nocapture",
     "check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
   }
 }

@@ -1,5 +1,7 @@
 @if(docs){
   <keystone-docs [version]="version()" />
+} @else if(config()?.setupRequired){
+  <keystone-setup />
 } @else {
 <header class="topbar" [class.workspace-header]="admin()">
   @if(admin()){
@@ -33,7 +35,7 @@
   <aside id="workspace-sidebar" class="sidebar" [class.open]="menuOpen()" aria-label="Workspace navigation">
     <a class="sidebar-brand" href="/"><img src="/logo.svg" width="34" height="34" alt=""><span>Keystone<small>Vault</small></span></a>
     <div class="sidebar-scroll">
-      <div class="nav-caption with-action"><span>Applications</span><button (click)="show('vault'); store.createApp()" [disabled]="store.status()?.sealed" aria-label="New application" title="New application">+</button></div>
+      <div class="nav-caption with-action"><span>Applications</span>@if(store.isAdmin()){<button (click)="show('vault'); store.createApp()" [disabled]="store.status()?.sealed" aria-label="New application" title="New application">+</button>}</div>
       <nav aria-label="Applications">
         @for(app of store.apps(); track app.id){
           <a href="#" (click)="$event.preventDefault(); openApp(app.id)" [class.active]="view()==='vault' && app.id===store.selectedId()" [attr.aria-current]="view()==='vault' && app.id===store.selectedId()?'page':null"><span class="app-dot">{{app.name.slice(0,2).toUpperCase()}}</span><span class="app-name">{{app.name}}</span></a>
@@ -43,29 +45,66 @@
       </nav>
       <p class="nav-caption">Security</p>
       <nav aria-label="Security">
+        <a href="#health" (click)="$event.preventDefault(); show('health')" [class.active]="view()==='health'" [attr.aria-current]="view()==='health'?'page':null"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>Health checks@if(store.badges().health){<span class="nav-badge warn">{{store.badges().health}}</span>}</a>
+        <a href="#approvals" (click)="$event.preventDefault(); show('approvals')" [class.active]="view()==='approvals'" [attr.aria-current]="view()==='approvals'?'page':null"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg>Approvals@if(store.badges().approvals){<span class="nav-badge">{{store.badges().approvals}}</span>}</a>
         <a href="#audit" (click)="$event.preventDefault(); show('audit')" [class.active]="view()==='audit'" [attr.aria-current]="view()==='audit'?'page':null"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6l1 2h3v15H5V6h3z"/><path d="M9 11h6M9 15h4"/></svg>Audit log</a>
       </nav>
+      @if(store.isAdmin()){
+        <p class="nav-caption">Administration</p>
+        <nav aria-label="Administration">
+          <a href="#settings" (click)="$event.preventDefault(); show('settings')" [class.active]="view()==='settings'" [attr.aria-current]="view()==='settings'?'page':null"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>
+        </nav>
+      }
       <p class="nav-caption">Help</p>
       <nav aria-label="Help">
         <a href="/docs" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5zM4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5"/><path d="M9 8h7M9 12h5"/></svg>Documentation</a>
         @if(config()?.portalUrl){<a [href]="config()!.portalUrl" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18M3 12h18"/></svg>Portal SSO</a>}
       </nav>
     </div>
-    <div class="sidebar-footer"><div class="account-summary"><span class="avatar">{{(admin()?.name || admin()?.email || 'A').slice(0,1).toUpperCase()}}</span><div><strong [title]="admin()?.email || 'Administrator'">{{admin()?.email || admin()?.name || 'Administrator'}}</strong><small>Administrator</small></div></div><button class="quiet" (click)="logout()">Sign out</button><p>v{{version()}}</p></div>
+    <div class="sidebar-footer"><div class="account-summary"><span class="avatar">{{(admin()?.name || admin()?.email || 'A').slice(0,1).toUpperCase()}}</span><div><strong [title]="admin()?.email || 'Administrator'">{{admin()?.email || admin()?.name || 'Administrator'}}</strong><small>{{store.isAdmin() ? 'Administrator' : 'Application owner'}}</small></div></div>@if(isLocal()){<button class="quiet" (click)="pw.set({current:'',next:'',confirm:''}); pwDone.set('')">Change password</button>}<button class="quiet" (click)="logout()">Sign out</button><p>v{{version()}}</p></div>
   </aside>
 }
 <main [class.with-sidebar]="admin()">
 @if(!admin()){
   <section class="login-shell"><div class="login-intro"><p class="eyebrow">Part of the Portal suite</p><h1>Secrets your apps<br>load at startup.</h1><p class="lede">Encrypted keys and whole configuration files for every Portal application. Each one is versioned and audited, and apps load them with a scoped, read-only token.</p><div class="login-art" aria-hidden="true"><span class="art-node">PORTAL SSO</span><span class="art-line"></span><span class="art-node core">KEYSTONE</span><span class="art-line"></span><span class="art-node">YOUR APPS</span></div></div>
-  <div class="login-card"><img class="login-logo" src="/logo.svg" width="56" height="56" alt="Keystone"><div class="badge">Restricted access</div><h2>Sign in to Keystone Vault</h2><p>Use your Portal SSO account. Access is limited to Portal administrators.</p>
+  <div class="login-card"><img class="login-logo" src="/logo.svg" width="56" height="56" alt="Keystone"><div class="badge">Restricted access</div><h2>Sign in to Keystone Vault</h2>
+    <p>@if(config()?.configured && config()?.local){Use Portal SSO or a Keystone account.}@else if(config()?.local){Use your Keystone account.}@else{Use your Portal SSO account. Access is limited to administrators.}</p>
     @if(starting()){<p role="status">Connecting to Keystone…</p>}
-    @else if(config()?.configured){<button class="primary full" [disabled]="busy()" (click)="login()">{{busy()?'Connecting…':'Continue with Portal SSO'}} <span>↗</span></button>}
-    @else if(config()){<div class="notice">Portal SSO is not connected yet. Configure its issuer and registered public client ID on the Keystone server.</div>}
+    @else {
+      @if(config()?.configured){<button class="primary full" [disabled]="busy()" (click)="login()">{{busy()?'Connecting…':'Continue with Portal SSO'}} <span>↗</span></button>}
+      @if(config()?.configured && config()?.local){<div class="or"><span>or</span></div>}
+      @if(config()?.local){
+        <form class="local-login" (submit)="$event.preventDefault(); loginLocal()">
+          <label>Email<input type="email" autocomplete="username" [value]="email()" (input)="email.set($any($event.target).value)" required></label>
+          <label>Password<input type="password" autocomplete="current-password" [value]="password()" (input)="password.set($any($event.target).value)" required></label>
+          <button class="primary full" type="submit" [disabled]="busy() || !email().trim() || !password()">{{busy()?'Signing in…':'Sign in'}}</button>
+        </form>
+      }
+      @if(config() && !config()?.configured && !config()?.local){<div class="notice">No sign-in method is configured. Set <code>portal.url</code> or <code>auth.local=true</code> in keystone.properties.</div>}
+    }
     @if(error()){<p class="error" role="alert">{{error()}}</p>}
-    <button class="quiet retry" [disabled]="starting()||busy()" (click)="initialize()">Check connection again</button><p class="fine">Authentication is managed by Portal SSO. Keystone never sees your password. New here? <a href="/docs">Read the docs</a>.</p>
+    <button class="quiet retry" [disabled]="starting()||busy()" (click)="initialize()">Check connection again</button><p class="fine">@if(config()?.configured){Portal SSO sign-in never shares your password with Keystone. }Local passwords are stored only as Argon2id hashes. <a href="/docs">Read the docs</a>.</p>
   </div></section>
 } @else {
-  @if(view()==='audit'){<keystone-audit />}@else{<keystone-vault [portalUrl]="config()?.portalUrl || ''" />}
+  @switch(view()){
+    @case('audit'){<keystone-audit />}
+    @case('health'){<keystone-health />}
+    @case('approvals'){<keystone-approvals />}
+    @case('settings'){<keystone-settings />}
+    @default{<keystone-vault [portalUrl]="config()?.portalUrl || ''" />}
+  }
 }
 </main>
+}
+
+@if(pw(); as f){
+<div class="pw-backdrop" (click)="pw.set(null)"></div>
+<form class="pw-modal" role="dialog" aria-modal="true" aria-labelledby="pw-title" (submit)="$event.preventDefault(); changePassword()">
+  <h2 id="pw-title">Change password</h2>
+  <label>Current password<input type="password" autocomplete="current-password" [value]="f.current" (input)="pw.set({current:$any($event.target).value,next:f.next,confirm:f.confirm})"></label>
+  <label>New password<input type="password" autocomplete="new-password" [value]="f.next" (input)="pw.set({current:f.current,next:$any($event.target).value,confirm:f.confirm})"></label>
+  <label>Confirm new password<input type="password" autocomplete="new-password" [value]="f.confirm" (input)="pw.set({current:f.current,next:f.next,confirm:$any($event.target).value})"></label>
+  @if(pwDone()){<p class="error">{{pwDone()}}</p>}
+  <div class="pw-actions"><button type="button" class="quiet" (click)="pw.set(null)">Cancel</button><button class="primary" type="submit" [disabled]="!f.current || !f.next">Change password</button></div>
+</form>
 }

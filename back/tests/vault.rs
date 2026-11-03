@@ -34,7 +34,7 @@ fn config(sealed: bool) -> Config {
     Config {
         bind: "127.0.0.1:0".into(),
         database_url: "sqlite::memory:".into(),
-        ui_dir: "missing-test-ui".into(),
+        ui_dir: None,
         service_key: String::new(),
         portal_url: "https://portal.test".into(),
         client_id: "keystone-test".into(),
@@ -44,6 +44,7 @@ fn config(sealed: bool) -> Config {
             master_key(&STANDARD.encode([42u8; 32])).unwrap()
         },
         trust_proxy: true,
+        ..Default::default()
     }
 }
 
@@ -60,7 +61,7 @@ fn admin_token() -> String {
 }
 
 async fn app(sealed: bool) -> (Router, AppState) {
-    let s = state(config(sealed)).await.unwrap();
+    let s = state(on_test_db(config(sealed)).await).await.unwrap();
     *s.keys.lock().await = KeyCache {
         keys: Some(SIGNER.1.clone()),
         fetched: Some(Instant::now()),
@@ -553,4 +554,12 @@ async fn audit_screen_filters_pages_summarises_and_exports() {
     // The export is itself audited.
     let (_, log) = call.admin("GET", &format!("{audit}?limit=1"), None).await;
     assert_eq!(log["items"][0]["event"], "vault.audit.export");
+}
+
+/// In-memory SQLite, or a fresh MySQL database when KEYSTONE_TEST_MYSQL_URL is set (CI).
+async fn on_test_db(mut config: Config) -> Config {
+    if config.database_url == "sqlite::memory:" {
+        config.database_url = keystone::db::test_url().await;
+    }
+    config
 }

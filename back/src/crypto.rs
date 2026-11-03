@@ -41,6 +41,40 @@ impl MasterKey {
     }
 }
 
+const CHECK: &[u8] = b"keystone-master-key-check-v1";
+
+impl MasterKey {
+    /// A value only this key can open, stored once so a wrong key is caught at startup.
+    pub fn check_value(&self) -> anyhow::Result<Vec<u8>> {
+        seal(&self.0, CHECK, b"keystone:kek-check")
+    }
+    pub fn verify(&self, check: &[u8]) -> bool {
+        open(&self.0, check, b"keystone:kek-check").is_ok_and(|v| v == CHECK)
+    }
+    /// Re-wraps an application data key under `next` without touching any secret.
+    pub fn rewrap(
+        &self,
+        next: &MasterKey,
+        app_id: &str,
+        wrapped: &[u8],
+    ) -> anyhow::Result<Vec<u8>> {
+        let aad = format!("keystone:dek:{app_id}");
+        let raw = open(&self.0, wrapped, aad.as_bytes())?;
+        seal(&next.0, &raw, aad.as_bytes())
+    }
+    /// Console settings that may be credentials, sealed directly by the master key.
+    pub fn seal_setting(&self, key: &str, value: &[u8]) -> anyhow::Result<Vec<u8>> {
+        seal(&self.0, value, format!("keystone:setting:{key}").as_bytes())
+    }
+    pub fn open_setting(&self, key: &str, sealed: &[u8]) -> anyhow::Result<Vec<u8>> {
+        open(
+            &self.0,
+            sealed,
+            format!("keystone:setting:{key}").as_bytes(),
+        )
+    }
+}
+
 pub struct DataKey(Key<Aes256Gcm>);
 
 impl DataKey {
@@ -141,6 +175,29 @@ mod tests {
         assert_eq!(key.open(&sealed, &here).unwrap(), b"hunter2");
         let there = location("billing", "dev", "key", "db.password", 1);
         assert!(key.open(&sealed, &there).is_err());
+    }
+
+    #[test]
+    fn rotation_rewraps_and_check_value_detects_wrong_key() {
+        let old = MasterKey::from_bytes([1; 32]);
+        let next = MasterKey::from_bytes([2; 32]);
+        let wrapped = old.new_data_key("app").unwrap();
+        let sealed = old
+            .unwrap_data_key("app", &wrapped)
+            .unwrap()
+            .seal(b"v", "loc")
+            .unwrap();
+        let rewrapped = old.rewrap(&next, "app", &wrapped).unwrap();
+        assert!(old.unwrap_data_key("app", &rewrapped).is_err());
+        assert_eq!(
+            next.unwrap_data_key("app", &rewrapped)
+                .unwrap()
+                .open(&sealed, "loc")
+                .unwrap(),
+            b"v"
+        );
+        let check = old.check_value().unwrap();
+        assert!(old.verify(&check) && !next.verify(&check));
     }
 
     #[test]

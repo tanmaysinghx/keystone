@@ -18,9 +18,19 @@
           <button (click)="menu.set(null); openImport()">Import .properties / .env as keys</button>
           <button (click)="menu.set(null); exportConfig('properties')">Export as .properties</button>
           <button (click)="menu.set(null); exportConfig('env')">Export as .env</button>
-          @if(env()!=='default'){<button class="danger" (click)="menu.set(null); askDeleteEnv()">Delete {{env()}} environment</button>}
+          @if(app.environments.length > 1){<button (click)="menu.set(null); openPromote()">Compare &amp; promote into {{env()}}…</button>}
+          @if(store.isAdmin()){
+            @if(protectedEnv()){<button (click)="menu.set(null); setProtection(false)">Remove protection from {{env()}}</button>}
+            @else{<button (click)="menu.set(null); setProtection(true)">Protect {{env()}} (require approval)</button>}
+          }
+          @if(env()!=='default' && (store.isAdmin() || !protectedEnv())){<button class="danger" (click)="menu.set(null); askDeleteEnv()">Delete {{env()}} environment</button>}
+          @if(store.isAdmin()){
+            <hr>
+            <button class="danger" (click)="menu.set(null); askDeleteApp()">Delete application</button>
+          }
           <hr>
-          <button class="danger" (click)="menu.set(null); askDeleteApp()">Delete application</button>
+          <p class="dropdown-label">Portal role for owners</p>
+          <button (click)="menu.set(null); copy(app.role, 'Role name copied')" title="Create this role in Portal SSO and assign it to the app's team"><code>{{app.role}}</code></button>
         </div>
       }
     </div>
@@ -28,7 +38,7 @@
 
   <div class="env-row" role="tablist" aria-label="Environments">
     @for(e of app.environments; track e){
-      <button role="tab" class="env" [class.active]="e===env()" [attr.aria-selected]="e===env()" (click)="chooseEnv(e)" [title]="e==='default' ? 'Shared by every environment' : 'Inherits from default'">{{e}}</button>
+      <button role="tab" class="env" [class.active]="e===env()" [class.locked]="isProtected(e)" [attr.aria-selected]="e===env()" (click)="chooseEnv(e)" [title]="isProtected(e) ? 'Protected: changes need a second administrator' : e==='default' ? 'Shared by every environment' : 'Inherits from default'">@if(isProtected(e)){<svg class="lock" viewBox="0 0 24 24" aria-label="protected"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>}{{e}}</button>
     }
     <span class="menu-wrap">
       <button class="env add" (click)="toggleMenu('env-add', $event)" aria-label="Add environment">+</button>
@@ -42,6 +52,7 @@
     </span>
     @if(env()!=='default'){<span class="inherit">inherits <strong>default</strong></span>}
   </div>
+  @if(protectedEnv()){<p class="protected-note"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><strong>{{env()}} is protected.</strong> Changes you make here wait in <a href="#approvals" (click)="$event.preventDefault(); store.show('approvals')">Approvals</a> until another administrator approves them.</p>}
 
   <nav class="tabs" aria-label="Sections">
     <button [class.active]="tab()==='keys'" (click)="chooseTab('keys')">Keys<span class="count">{{keyCount()}}</span></button>
@@ -125,15 +136,16 @@
     </div>
     @if(tokens().length){
     <div class="table-wrap"><table class="items">
-      <thead><tr><th>Name</th><th>Environment</th><th>Last used</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
+      <thead><tr><th>Name</th><th>Environment</th><th>Allowed from</th><th>Last used</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead>
       <tbody>
       @for(t of tokens(); track t.id){
         <tr [class.muted]="!t.active">
           <td><strong class="name">{{t.name}}</strong><small class="type">ksv_{{t.id}}… · {{t.expiresAt ? 'expires ' + (t.expiresAt*1000 | date:'mediumDate') : 'no expiry'}}</small></td>
           <td><span class="pill">{{t.environment}}</span></td>
+          <td class="meta">@if(t.allowedCidrs){<code>{{t.allowedCidrs}}</code>}@else{<span [class.warn-text]="isProtected(t.environment)">Any address</span>}</td>
           <td class="meta">{{t.lastUsedAt ? (t.lastUsedAt*1000 | date:'MMM d, HH:mm') : 'Never'}}</td>
           <td><span class="status" [class.down]="!t.active"><span class="dot"></span>{{t.revokedAt ? 'Revoked' : t.active ? 'Active' : 'Expired'}}</span></td>
-          <td class="row-actions">@if(t.active){<button class="text-btn danger" (click)="askRevoke(t)">Revoke</button>}</td>
+          <td class="row-actions">@if(t.active){<button class="text-btn" (click)="openAllowList(t)">Restrict IPs</button><button class="text-btn danger" (click)="askRevoke(t)">Revoke</button>}</td>
         </tr>
       }
       </tbody>
@@ -146,7 +158,7 @@
     <p class="hint">Give the app <code>KEYSTONE_URL={{origin}}</code> and a <code>KEYSTONE_TOKEN</code> from <button class="link" (click)="chooseTab('tokens')">Access tokens</button>. The token decides the environment. <a href="/docs/quick-start" target="_blank" rel="noopener">Full guide ↗</a></p>
     <div class="code-card">
       <div class="code-tabs">
-        @for(s of [['spring','Spring Boot'],['node','Node.js'],['shell','Docker / shell'],['file','Files & keys']]; track s[0]){
+        @for(s of [['spring','Spring Boot'],['node','Node.js'],['shell','Docker / shell'],['cli','keystone CLI'],['reload','Live reload'],['file','Files & keys']]; track s[0]){
           <button [class.active]="snippet()===s[0]" (click)="snippet.set($any(s[0]))">{{s[1]}}</button>
         }
         <button class="copy" (click)="copy(snippets()[snippet()], 'Snippet copied')">Copy</button>
@@ -246,9 +258,10 @@
 <div class="modal-backdrop" (click)="tokenForm.set(null)"></div>
 <div class="modal" role="dialog" aria-modal="true" aria-labelledby="token-title">
   <h2 id="token-title">Issue access token</h2>
-  <label>Name<input [value]="t.name" (input)="tokenForm.set({name:$any($event.target).value,environment:t.environment,expiresInDays:t.expiresInDays})" maxlength="80"><small>Where it is deployed, e.g. “billing prod (k8s)”.</small></label>
-  <label>Environment<select [value]="t.environment" (change)="tokenForm.set({name:t.name,environment:$any($event.target).value,expiresInDays:t.expiresInDays})">@for(e of selected()?.environments; track e){<option [value]="e" [selected]="e===t.environment">{{e}}</option>}</select></label>
-  <label>Expires<select (change)="tokenForm.set({name:t.name,environment:t.environment,expiresInDays:+$any($event.target).value})">@for(d of [[30,'30 days'],[90,'90 days'],[365,'1 year'],[0,'Never']]; track d[0]){<option [value]="d[0]" [selected]="d[0]===t.expiresInDays">{{d[1]}}</option>}</select></label>
+  <label>Name<input [value]="t.name" (input)="tokenForm.set({name:$any($event.target).value,environment:t.environment,expiresInDays:t.expiresInDays,allowedCidrs:t.allowedCidrs})" maxlength="80"><small>Where it is deployed, e.g. “billing prod (k8s)”.</small></label>
+  <label>Environment<select [value]="t.environment" (change)="tokenForm.set({name:t.name,environment:$any($event.target).value,expiresInDays:t.expiresInDays,allowedCidrs:t.allowedCidrs})">@for(e of selected()?.environments; track e){<option [value]="e" [selected]="e===t.environment">{{e}}</option>}</select></label>
+  <label>Expires<select (change)="tokenForm.set({name:t.name,environment:t.environment,expiresInDays:+$any($event.target).value,allowedCidrs:t.allowedCidrs})">@for(d of [[30,'30 days'],[90,'90 days'],[365,'1 year'],[0,'Never']]; track d[0]){<option [value]="d[0]" [selected]="d[0]===t.expiresInDays">{{d[1]}}</option>}</select></label>
+  <label>Allowed IP addresses<textarea rows="2" placeholder="Any address. Or e.g. 10.20.0.0/16, 203.0.113.7" [value]="t.allowedCidrs" (input)="tokenForm.set({name:t.name,environment:t.environment,expiresInDays:t.expiresInDays,allowedCidrs:$any($event.target).value})" spellcheck="false"></textarea><small>Strongly recommended for production: a leaked token is useless from anywhere else.</small></label>
   <div class="modal-actions"><button class="quiet" (click)="tokenForm.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !t.name.trim()" (click)="createToken()">Issue token</button></div>
 </div>
 }
@@ -271,5 +284,39 @@
   <p class="fine">{{c.message}}</p>
   @if(c.expect){<label>Type <code>{{c.expect}}</code> to confirm<input [value]="c.typed" (input)="confirm.set({title:c.title,message:c.message,expect:c.expect,typed:$any($event.target).value,run:c.run})" autofocus></label>}
   <div class="modal-actions"><button class="quiet" (click)="confirm.set(null)">Cancel</button><button class="primary danger-fill" [disabled]="busy() || (!!c.expect && c.typed!==c.expect)" (click)="confirmRun()">Delete</button></div>
+</div>
+}
+
+@if(allowList(); as a){
+<div class="modal-backdrop" (click)="allowList.set(null)"></div>
+<div class="modal" role="dialog" aria-modal="true" aria-labelledby="allow-title">
+  <h2 id="allow-title">Restrict “{{a.token.name}}”</h2>
+  <p class="fine">The token works only from these addresses. Anything else is refused, audited and alerted. Leave empty to allow any address.</p>
+  <label>IP addresses and ranges<textarea rows="3" placeholder="10.20.0.0/16, 203.0.113.7, 2001:db8::/32" [value]="a.value" (input)="allowList.set({token:a.token,value:$any($event.target).value})" spellcheck="false" autofocus></textarea><small>Behind a reverse proxy, set <code>server.trust-proxy=true</code> so Keystone sees the real client address.</small></label>
+  <div class="modal-actions"><button class="quiet" (click)="allowList.set(null)">Cancel</button><button class="primary" [disabled]="busy()" (click)="saveAllowList()">Save</button></div>
+</div>
+}
+
+@if(promote(); as pr){
+<div class="modal-backdrop" (click)="promote.set(null)"></div>
+<div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="promote-title">
+  <h2 id="promote-title">Compare &amp; promote into {{env()}}</h2>
+  <p class="fine">Compares values without showing them. Ticked items are copied from the source into <strong>{{env()}}</strong>@if(protectedEnv()){ as change requests, because {{env()}} is protected}.</p>
+  <label>Copy from<select (change)="promote.set({from:$any($event.target).value,diff:null,chosen:{}}); comparePromote()">@for(e of selected()?.environments; track e){@if(e!==env()){<option [value]="e" [selected]="e===pr.from">{{e}}</option>}}</select></label>
+  @if(pr.diff; as diff){
+    @if(diff.length){
+    <div class="table-wrap"><table class="items">
+      <thead><tr><th></th><th>Item</th><th>Compared with {{env()}}</th></tr></thead>
+      <tbody>@for(d of diff; track d.item){
+        <tr [class.muted]="d.status==='same' || d.status==='only-in-target'">
+          <td>@if(d.status==='added' || d.status==='changed'){<input type="checkbox" [checked]="pr.chosen[d.item]" (change)="choose(d.item, $any($event.target).checked)" [attr.aria-label]="'Copy '+d.item">}</td>
+          <td><code class="key">{{itemLabel(d.item)}}</code><small class="type">{{d.item.startsWith('file:') ? 'file' : 'key'}}</small></td>
+          <td><span class="diff-status" [attr.data-status]="d.status">{{d.status==='added' ? 'Only in ' + pr.from : d.status==='changed' ? 'Different' : d.status==='same' ? 'Identical' : 'Only in ' + env()}}</span></td>
+        </tr>
+      }</tbody>
+    </table></div>
+    } @else {<p class="fine">{{pr.from}} has no keys or files.</p>}
+  } @else {<p class="fine">Comparing…</p>}
+  <div class="modal-actions"><button class="quiet" (click)="promote.set(null)">Cancel</button><button class="primary" [disabled]="busy() || !pr.diff" (click)="applyPromote()">Copy selected</button></div>
 </div>
 }

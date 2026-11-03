@@ -1,0 +1,26 @@
+<section class="page-heading">
+  <div><h1>Health checks</h1><p class="lede">What to fix to keep the vault safe: expiring or unused tokens, stale secrets, unprotected production, refused tokens and backup hygiene.</p></div>
+  <button class="quiet" (click)="load()">Re-run checks</button>
+</section>
+@if(error()){<div class="notice error">{{error()}}</div>}
+@if(data(); as d){
+  <div class="counts">
+    <button class="chip" [class.active]="severity()==='all'" (click)="severity.set('all')">All <strong>{{d.items.length}}</strong></button>
+    <button class="chip" [class.active]="severity()==='high'" (click)="severity.set('high')">High <strong>{{d.counts.high}}</strong></button>
+    <button class="chip" [class.active]="severity()==='medium'" (click)="severity.set('medium')">Medium <strong>{{d.counts.medium}}</strong></button>
+    <button class="chip" [class.active]="severity()==='low'" (click)="severity.set('low')">Low <strong>{{d.counts.low}}</strong></button>
+  </div>
+  @if(items().length){
+    <div class="card list">
+      @for(f of items(); track f.kind + f.title + (f.app || '') + (f.environment || '')){
+        <div class="row">
+          <span class="sev" [class]="'sev ' + f.severity">{{f.severity}}</span>
+          <div class="grow"><h3>{{f.title}}</h3><p>{{f.detail}}</p>@if(f.app){<div class="meta">{{f.app}}@if(f.environment){ / {{f.environment}}}</div>}</div>
+          <div class="actions"><button class="quiet" (click)="open(f)">{{label(f)}}</button></div>
+        </div>
+      }
+    </div>
+  } @else {
+    <div class="blank"><span class="ok-mark"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><h3>{{severity()==='all' ? 'All clear' : 'Nothing at this level'}}</h3><p>Checks re-run each time you open this page.</p></div>
+  }
+}

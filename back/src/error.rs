@@ -33,3 +33,9 @@ pub fn unauthorized() -> ApiError {
         "A valid Portal SSO access token is required",
     )
 }
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.2, self.1)
+    }
+}
+impl std::error::Error for ApiError {}

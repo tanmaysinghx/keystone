@@ -1,6 +1,8 @@
 //! Vault storage and the administrator API (Portal SSO, `ROLE_ADMIN`).
+use crate::db::{Conn, Db, Dialect};
 use crate::{
     AppState,
+    auth::Access,
     auth::Claims,
     client::Actor,
     crypto::{self, DataKey},
@@ -16,7 +18,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::{SqliteConnection, SqlitePool};
 
 pub const MAX_VALUE: usize = 64 * 1024;
 pub const MAX_FILE: usize = 512 * 1024;
@@ -32,7 +33,6 @@ type AppRow = (
     Option<String>,
     i64,
     i64,
-    String,
     i64,
     i64,
     i64,
@@ -46,6 +46,7 @@ type TokenRow = (
     Option<i64>,
     Option<i64>,
     Option<i64>,
+    Option<String>,
 );
 pub const DEFAULT_ENV: &str = "default";
 
@@ -177,22 +178,43 @@ pub fn admin_subject(claims: &Claims) -> String {
 
 /// Audit is part of the operation: if the event cannot be recorded, the operation fails.
 pub async fn audit(
-    db: &SqlitePool,
+    state: &AppState,
     actor: &Actor,
     event: &str,
     target: &str,
 ) -> Result<(), ApiError> {
+    let db = &state.db;
     sqlx::query(
-        "INSERT INTO audit_events (subject, event, target, ip, user_agent) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO audit_events (subject, event, target, ip, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&actor.subject)
     .bind(event)
     .bind(target)
     .bind(&actor.ip)
     .bind(&actor.user_agent)
+    .bind(crate::now() as i64)
     .execute(db)
     .await?;
+    if is_change_event(event) {
+        // Wakes /api/v1/vault/watch long-polls so running apps can reload.
+        state.changed.notify_waiters();
+    }
+    crate::alerts::on_event(state, actor, event, target);
     Ok(())
+}
+
+pub fn is_change_event(event: &str) -> bool {
+    [
+        ".write",
+        ".delete",
+        ".rollback",
+        ".import",
+        ".promote",
+        ".change.approve",
+    ]
+    .iter()
+    .any(|suffix| event.ends_with(suffix))
+        || event == "vault.import"
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -218,21 +240,22 @@ pub async fn data_key(state: &AppState, app: &str) -> Result<DataKey, ApiError> 
     })
 }
 
-async fn ensure_environment(db: &SqlitePool, app: &str, environment: &str) -> Result<(), ApiError> {
+pub async fn ensure_environment(db: &Db, app: &str, environment: &str) -> Result<(), ApiError> {
     let found: Option<(i64,)> =
-        sqlx::query_as("SELECT 1 FROM vault_environments WHERE app_id = ? AND name = ?")
+        sqlx::query_as("SELECT COUNT(*) FROM vault_environments WHERE app_id = ? AND name = ?")
             .bind(app)
             .bind(environment)
             .fetch_optional(db)
             .await?;
-    found
-        .map(|_| ())
-        .ok_or_else(|| missing("environment_not_found", "Environment not found"))
+    match found {
+        Some((n,)) if n > 0 => Ok(()),
+        _ => Err(missing("environment_not_found", "Environment not found")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn write_item(
-    conn: &mut SqliteConnection,
+    conn: &mut Conn,
     key: &DataKey,
     app: &str,
     environment: &str,
@@ -243,7 +266,7 @@ pub async fn write_item(
     actor: &str,
 ) -> Result<i64, ApiError> {
     let (count, exists): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(kind = ? AND name = ?), 0) FROM vault_items WHERE app_id = ? AND environment = ?",
+        "SELECT COUNT(*), CAST(COALESCE(SUM(CASE WHEN kind = ? AND name = ? THEN 1 ELSE 0 END), 0) AS SIGNED) FROM vault_items WHERE app_id = ? AND environment = ?",
     )
     .bind(kind.as_str())
     .bind(name)
@@ -257,32 +280,47 @@ pub async fn write_item(
             "An environment holds at most 1000 keys and files",
         ));
     }
-    let (id, version): (i64, i64) = sqlx::query_as(
-        "INSERT INTO vault_items (app_id, environment, kind, name, current_version, content_type, updated_by)
-         VALUES (?, ?, ?, ?, 1, ?, ?)
-         ON CONFLICT (app_id, environment, kind, name) DO UPDATE SET
-           current_version = current_version + 1, content_type = excluded.content_type,
-           updated_by = excluded.updated_by, updated_at = unixepoch()
-         RETURNING id, current_version",
-    )
+    // Insert or bump the version; then read it back (MySQL has no RETURNING). The row is locked
+    // by the write until the transaction ends, so the number read is this write's own.
+    let now = crate::now() as i64;
+    let upsert = Dialect::of(conn).upsert(
+        "app_id, environment, kind, name",
+        &["content_type", "updated_by", "updated_at"],
+        &["current_version = current_version + 1"],
+    );
+    sqlx::query(&format!(
+        "INSERT INTO vault_items (app_id, environment, kind, name, current_version, content_type, updated_by, updated_at)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?) {upsert}"
+    ))
     .bind(app)
     .bind(environment)
     .bind(kind.as_str())
     .bind(name)
     .bind(content_type)
     .bind(actor)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    let (id, version): (i64, i64) = sqlx::query_as(
+        "SELECT id, current_version FROM vault_items WHERE app_id = ? AND environment = ? AND kind = ? AND name = ?",
+    )
+    .bind(app)
+    .bind(environment)
+    .bind(kind.as_str())
+    .bind(name)
     .fetch_one(&mut *conn)
     .await?;
     let location = crypto::location(app, environment, kind.as_str(), name, version);
     let sealed = key.seal(bytes, &location).map_err(|_| internal())?;
     sqlx::query(
-        "INSERT INTO vault_versions (item_id, version, ciphertext, size, created_by) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO vault_versions (item_id, version, ciphertext, size, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(id)
     .bind(version)
     .bind(sealed)
     .bind(bytes.len() as i64)
     .bind(actor)
+    .bind(now)
     .execute(&mut *conn)
     .await?;
     sqlx::query("DELETE FROM vault_versions WHERE item_id = ? AND version <= ?")
@@ -301,7 +339,7 @@ pub struct Stored {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn read_item(
-    db: &SqlitePool,
+    db: &Db,
     key: &DataKey,
     app: &str,
     environment: &str,
@@ -346,7 +384,7 @@ pub struct Layer {
 /// keys(env) > .properties files(env) > keys(default) > .properties files(default).
 /// Files are merged in name order, so `application-z.properties` overrides `application.properties`.
 pub async fn resolve(
-    db: &SqlitePool,
+    db: &Db,
     key: &DataKey,
     app: &str,
     environment: &str,
@@ -477,8 +515,9 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
         "SELECT (SELECT COUNT(*) FROM vault_apps),
                 (SELECT COUNT(*) FROM vault_items WHERE kind = 'key'),
                 (SELECT COUNT(*) FROM vault_items WHERE kind = 'file'),
-                (SELECT COUNT(*) FROM vault_tokens WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > unixepoch()))",
+                (SELECT COUNT(*) FROM vault_tokens WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?))",
     )
+    .bind(crate::now() as i64)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(json!({
@@ -488,22 +527,42 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>, ApiErr
     })))
 }
 
-pub async fn list_apps(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let apps: Vec<AppRow> = sqlx::query_as(
+pub async fn list_apps(
+    State(state): State<AppState>,
+    Extension(access): Extension<Access>,
+) -> Result<Json<Value>, ApiError> {
+    let mut apps: Vec<AppRow> = sqlx::query_as(
         "SELECT a.id, a.name, a.description, a.portal_client_id, a.created_at, a.updated_at,
-                COALESCE((SELECT group_concat(name, ',') FROM (SELECT name FROM vault_environments e WHERE e.app_id = a.id ORDER BY name = 'default' DESC, name)), ''),
                 (SELECT COUNT(*) FROM vault_items i WHERE i.app_id = a.id AND kind = 'key'),
                 (SELECT COUNT(*) FROM vault_items i WHERE i.app_id = a.id AND kind = 'file'),
-                (SELECT COUNT(*) FROM vault_tokens t WHERE t.app_id = a.id AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > unixepoch()))
-         FROM vault_apps a ORDER BY a.name COLLATE NOCASE",
+                (SELECT COUNT(*) FROM vault_tokens t WHERE t.app_id = a.id AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?))
+         FROM vault_apps a",
     )
+    .bind(crate::now() as i64)
     .fetch_all(&state.db)
     .await?;
+    apps.sort_by_key(|a| a.1.to_lowercase());
+    let envs: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT app_id, name, protected FROM vault_environments ORDER BY name")
+            .fetch_all(&state.db)
+            .await?;
+    // `default` first, then alphabetical.
+    let envs_of = |app: &str, protected_only: bool| {
+        let mut list: Vec<&str> = envs
+            .iter()
+            .filter(|(a, _, p)| a == app && (!protected_only || *p != 0))
+            .map(|(_, n, _)| n.as_str())
+            .collect();
+        list.sort_by_key(|n| (*n != DEFAULT_ENV, n.to_string()));
+        list
+    };
     Ok(Json(
-        json!({"items": apps.into_iter().map(|(id, name, description, portal_client_id, created_at, updated_at, envs, keys, files, tokens)| json!({
+        json!({"items": apps.into_iter().filter(|row| access.can(&row.0)).map(|(id, name, description, portal_client_id, created_at, updated_at, keys, files, tokens)| json!({
+        "role": crate::auth::app_role(&id),
+        "environments": envs_of(&id, false),
+        "protectedEnvironments": envs_of(&id, true),
         "id": id, "name": name, "description": description, "portalClientId": portal_client_id,
         "createdAt": created_at, "updatedAt": updated_at,
-        "environments": envs.split(',').filter(|e| !e.is_empty()).collect::<Vec<_>>(),
         "keyCount": keys, "fileCount": files, "activeTokens": tokens,
     })).collect::<Vec<_>>()}),
     ))
@@ -537,9 +596,11 @@ fn check_app_fields(name: &str, description: &str, portal: Option<&str>) -> Resu
 
 pub async fn create_app(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Json(input): Json<NewApp>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    access.require_admin()?;
     let master = state.config.master_key.as_ref().ok_or_else(sealed)?;
     check_app(&input.id)?;
     let portal = input.portal_client_id.as_deref().filter(|p| !p.is_empty());
@@ -560,15 +621,19 @@ pub async fn create_app(
     let wrapped = master.new_data_key(&input.id).map_err(|_| internal())?;
     let who = actor.subject.clone();
     let mut tx = state.db.begin().await?;
-    let inserted = sqlx::query(
-        "INSERT INTO vault_apps (id, name, description, portal_client_id, wrapped_key, created_by) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-    )
+    let now = crate::now() as i64;
+    let inserted = sqlx::query(&format!(
+        "{} vault_apps (id, name, description, portal_client_id, wrapped_key, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        Dialect::of(&tx).insert_ignore()
+    ))
     .bind(&input.id)
     .bind(input.name.trim())
     .bind(input.description.trim())
     .bind(portal)
     .bind(wrapped)
     .bind(&who)
+    .bind(now)
+    .bind(now)
     .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -579,14 +644,15 @@ pub async fn create_app(
         ));
     }
     for env in &environments {
-        sqlx::query("INSERT INTO vault_environments (app_id, name) VALUES (?, ?)")
+        sqlx::query("INSERT INTO vault_environments (app_id, name, created_at) VALUES (?, ?, ?)")
             .bind(&input.id)
             .bind(env)
+            .bind(now)
             .execute(&mut *tx)
             .await?;
     }
     tx.commit().await?;
-    audit(&state.db, &actor, "vault.app.create", &input.id).await?;
+    audit(&state, &actor, "vault.app.create", &input.id).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({"id": input.id, "environments": environments})),
@@ -605,25 +671,28 @@ pub struct AppUpdate {
 
 pub async fn update_app(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path(app): Path<String>,
     Json(input): Json<AppUpdate>,
 ) -> Result<Json<Value>, ApiError> {
+    access.require(&app)?;
     let portal = input.portal_client_id.as_deref().filter(|p| !p.is_empty());
     check_app_fields(&input.name, &input.description, portal)?;
     let updated = sqlx::query(
-        "UPDATE vault_apps SET name = ?, description = ?, portal_client_id = ?, updated_at = unixepoch() WHERE id = ?",
+        "UPDATE vault_apps SET name = ?, description = ?, portal_client_id = ?, updated_at = ? WHERE id = ?",
     )
     .bind(input.name.trim())
     .bind(input.description.trim())
     .bind(portal)
+    .bind(crate::now() as i64)
     .bind(&app)
     .execute(&state.db)
     .await?;
     if updated.rows_affected() == 0 {
         return Err(missing("app_not_found", "Application not found"));
     }
-    audit(&state.db, &actor, "vault.app.update", &app).await?;
+    audit(&state, &actor, "vault.app.update", &app).await?;
     Ok(Json(json!({"id": app})))
 }
 
@@ -634,10 +703,12 @@ pub struct Confirm {
 
 pub async fn delete_app(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path(app): Path<String>,
     Query(confirm): Query<Confirm>,
 ) -> Result<StatusCode, ApiError> {
+    access.require_admin()?;
     if confirm.confirm.as_deref() != Some(app.as_str()) {
         return Err(bad(
             "confirmation_required",
@@ -666,7 +737,7 @@ pub async fn delete_app(
         return Err(missing("app_not_found", "Application not found"));
     }
     tx.commit().await?;
-    audit(&state.db, &actor, "vault.app.delete", &app).await?;
+    audit(&state, &actor, "vault.app.delete", &app).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -677,10 +748,12 @@ pub struct NewEnvironment {
 
 pub async fn create_environment(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path(app): Path<String>,
     Json(input): Json<NewEnvironment>,
 ) -> Result<StatusCode, ApiError> {
+    access.require(&app)?;
     check_environment(&input.name)?;
     let (exists, count): (i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM vault_apps WHERE id = ?), (SELECT COUNT(*) FROM vault_environments WHERE app_id = ?)",
@@ -698,11 +771,13 @@ pub async fn create_environment(
             "At most 50 environments per application",
         ));
     }
-    let inserted = sqlx::query(
-        "INSERT INTO vault_environments (app_id, name) VALUES (?, ?) ON CONFLICT DO NOTHING",
-    )
+    let inserted = sqlx::query(&format!(
+        "{} vault_environments (app_id, name, created_at) VALUES (?, ?, ?)",
+        state.dialect.insert_ignore()
+    ))
     .bind(&app)
     .bind(&input.name)
+    .bind(crate::now() as i64)
     .execute(&state.db)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -713,7 +788,7 @@ pub async fn create_environment(
         ));
     }
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.environment.create",
         &format!("{app}/{}", input.name),
@@ -724,10 +799,12 @@ pub async fn create_environment(
 
 pub async fn delete_environment(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment)): Path<(String, String)>,
     Query(confirm): Query<Confirm>,
 ) -> Result<StatusCode, ApiError> {
+    access.require(&app)?;
     if environment == DEFAULT_ENV {
         return Err(bad(
             "default_environment",
@@ -739,6 +816,9 @@ pub async fn delete_environment(
             "confirmation_required",
             "Repeat the environment name in ?confirm= to delete it",
         ));
+    }
+    if crate::approvals::is_protected(&state.db, &app, &environment).await? {
+        access.require_admin()?;
     }
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM vault_tokens WHERE app_id = ? AND environment = ?")
@@ -766,7 +846,7 @@ pub async fn delete_environment(
     }
     tx.commit().await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.environment.delete",
         &format!("{app}/{environment}"),
@@ -780,8 +860,10 @@ pub async fn delete_environment(
 
 pub async fn list_items(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Path((app, environment)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    access.require(&app)?;
     ensure_environment(&state.db, &app, &environment).await?;
     let rows: Vec<(String, String, i64, String, i64, String, i64)> = sqlx::query_as(
         "SELECT i.kind, i.name, i.current_version, i.content_type, COALESCE(v.size, 0), i.updated_by, i.updated_at
@@ -812,11 +894,13 @@ pub struct VersionQuery {
 
 pub async fn put_item(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment, kind, name)): Path<(String, String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
+    access.require(&app)?;
     let kind = Kind::from_segment(&kind)?;
     kind.check_name(&name)?;
     let key = data_key(&state, &app).await?;
@@ -837,6 +921,24 @@ pub async fn put_item(
             (body.to_vec(), content_type(&headers))
         }
     };
+    if crate::approvals::is_protected(&state.db, &app, &environment).await? {
+        return crate::approvals::submit(
+            &state,
+            &actor,
+            &key,
+            crate::approvals::Proposal {
+                app: &app,
+                environment: &environment,
+                operation: "put",
+                kind,
+                name: &name,
+                payload: Some(&bytes),
+                content_type: &content_type,
+                summary: format!("Set {} {name}", kind.as_str()),
+            },
+        )
+        .await;
+    }
     let who = actor.subject.clone();
     let mut tx = state.db.begin().await?;
     let version = write_item(
@@ -853,21 +955,23 @@ pub async fn put_item(
     .await?;
     tx.commit().await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         &format!("vault.{}.write", kind.as_str()),
         &format!("{app}/{environment}/{name}@{version}"),
     )
     .await?;
-    Ok(Json(json!({"name": name, "version": version})))
+    Ok(Json(json!({"name": name, "version": version})).into_response())
 }
 
 pub async fn get_item(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment, kind, name)): Path<(String, String, String, String)>,
     Query(query): Query<VersionQuery>,
 ) -> Result<Response, ApiError> {
+    access.require(&app)?;
     let kind = Kind::from_segment(&kind)?;
     kind.check_name(&name)?;
     let key = data_key(&state, &app).await?;
@@ -881,13 +985,25 @@ pub async fn get_item(
         query.version,
     )
     .await?;
+    let protected = crate::approvals::is_protected(&state.db, &app, &environment).await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         &format!("vault.{}.reveal", kind.as_str()),
         &format!("{app}/{environment}/{name}@{}", stored.version),
     )
     .await?;
+    if protected {
+        crate::alerts::send(
+            &state,
+            "vault.protected.reveal",
+            format!(
+                "{} revealed {name} in protected environment {app}/{environment}",
+                actor.subject
+            ),
+            &actor,
+        );
+    }
     Ok(match kind {
         Kind::Key => Json(json!({
             "name": name, "version": stored.version,
@@ -900,41 +1016,75 @@ pub async fn get_item(
 
 pub async fn delete_item(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment, kind, name)): Path<(String, String, String, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
+    access.require(&app)?;
     let kind = Kind::from_segment(&kind)?;
+    if crate::approvals::is_protected(&state.db, &app, &environment).await? {
+        let key = data_key(&state, &app).await?;
+        read_item(&state.db, &key, &app, &environment, kind, &name, None).await?;
+        return crate::approvals::submit(
+            &state,
+            &actor,
+            &key,
+            crate::approvals::Proposal {
+                app: &app,
+                environment: &environment,
+                operation: "delete",
+                kind,
+                name: &name,
+                payload: None,
+                content_type: "text/plain",
+                summary: format!("Delete {} {name}", kind.as_str()),
+            },
+        )
+        .await;
+    }
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM vault_versions WHERE item_id IN (SELECT id FROM vault_items WHERE app_id = ? AND environment = ? AND kind = ? AND name = ?)")
-        .bind(&app).bind(&environment).bind(kind.as_str()).bind(&name)
-        .execute(&mut *tx).await?;
-    let deleted = sqlx::query(
-        "DELETE FROM vault_items WHERE app_id = ? AND environment = ? AND kind = ? AND name = ?",
-    )
-    .bind(&app)
-    .bind(&environment)
-    .bind(kind.as_str())
-    .bind(&name)
-    .execute(&mut *tx)
-    .await?;
-    if deleted.rows_affected() == 0 {
+    if !delete_item_rows(&mut tx, &app, &environment, kind, &name).await? {
         return Err(missing("item_not_found", "No such key or file"));
     }
     tx.commit().await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         &format!("vault.{}.delete", kind.as_str()),
         &format!("{app}/{environment}/{name}"),
     )
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn delete_item_rows(
+    conn: &mut Conn,
+    app: &str,
+    environment: &str,
+    kind: Kind,
+    name: &str,
+) -> Result<bool, ApiError> {
+    sqlx::query("DELETE FROM vault_versions WHERE item_id IN (SELECT id FROM vault_items WHERE app_id = ? AND environment = ? AND kind = ? AND name = ?)")
+        .bind(app).bind(environment).bind(kind.as_str()).bind(name)
+        .execute(&mut *conn).await?;
+    let deleted = sqlx::query(
+        "DELETE FROM vault_items WHERE app_id = ? AND environment = ? AND kind = ? AND name = ?",
+    )
+    .bind(app)
+    .bind(environment)
+    .bind(kind.as_str())
+    .bind(name)
+    .execute(&mut *conn)
+    .await?;
+    Ok(deleted.rows_affected() > 0)
 }
 
 pub async fn versions(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Path((app, environment, kind, name)): Path<(String, String, String, String)>,
 ) -> Result<Json<Value>, ApiError> {
+    access.require(&app)?;
     let kind = Kind::from_segment(&kind)?;
     let rows: Vec<(i64, i64, String, i64, i64)> = sqlx::query_as(
         "SELECT v.version, v.size, v.created_by, v.created_at, i.current_version FROM vault_versions v
@@ -965,10 +1115,12 @@ pub struct Rollback {
 /// Restores an earlier version by writing it again as the newest one; history is never rewritten.
 pub async fn rollback(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment, kind, name)): Path<(String, String, String, String)>,
     Json(input): Json<Rollback>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
+    access.require(&app)?;
     let kind = Kind::from_segment(&kind)?;
     let key = data_key(&state, &app).await?;
     let stored = read_item(
@@ -981,6 +1133,24 @@ pub async fn rollback(
         Some(input.version),
     )
     .await?;
+    if crate::approvals::is_protected(&state.db, &app, &environment).await? {
+        return crate::approvals::submit(
+            &state,
+            &actor,
+            &key,
+            crate::approvals::Proposal {
+                app: &app,
+                environment: &environment,
+                operation: "put",
+                kind,
+                name: &name,
+                payload: Some(&stored.bytes),
+                content_type: &stored.content_type,
+                summary: format!("Restore {name} to version {}", input.version),
+            },
+        )
+        .await;
+    }
     let who = actor.subject.clone();
     let mut tx = state.db.begin().await?;
     let version = write_item(
@@ -997,15 +1167,16 @@ pub async fn rollback(
     .await?;
     tx.commit().await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         &format!("vault.{}.rollback", kind.as_str()),
         &format!("{app}/{environment}/{name}@{} -> @{version}", input.version),
     )
     .await?;
-    Ok(Json(
-        json!({"name": name, "version": version, "restoredFrom": input.version}),
-    ))
+    Ok(
+        Json(json!({"name": name, "version": version, "restoredFrom": input.version}))
+            .into_response(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -1017,104 +1188,176 @@ pub struct Import {
     pub replace: bool,
 }
 
-/// Splits a `.properties` or dotenv file into individual keys. Unchanged values are skipped so
-/// re-importing the same file creates no new versions.
-pub async fn import(
-    State(state): State<AppState>,
-    Extension(actor): Extension<Actor>,
-    Path((app, environment)): Path<(String, String)>,
-    Json(input): Json<Import>,
-) -> Result<Response, ApiError> {
-    if input.content.len() > MAX_FILE {
-        return Err(bad("file_too_large", "Imports are limited to 512 KiB"));
+fn invalid(code: &str, message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": {"code": code, "message": message}})),
+    )
+        .into_response()
+}
+
+/// Parses an import, or explains (with the offending key) why it can't be imported.
+pub fn parse_import(format: &str, content: &str) -> Result<props::Map, Box<Response>> {
+    let reject = |r: Response| Err(Box::new(r));
+    if content.len() > MAX_FILE {
+        return reject(bad("file_too_large", "Imports are limited to 512 KiB").into_response());
     }
-    let map = match input.format.as_str() {
-        "properties" => props::parse_properties(&input.content),
-        "env" | "dotenv" => props::parse_dotenv(&input.content),
-        _ => return Err(bad("invalid_format", "Import format is properties or env")),
+    let map = match format {
+        "properties" => props::parse_properties(content),
+        "env" | "dotenv" => props::parse_dotenv(content),
+        _ => {
+            return reject(
+                bad("invalid_format", "Import format is properties or env").into_response(),
+            );
+        }
     };
     if let Some(key) = map.keys().find(|k| !valid_key(k)) {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"code": "invalid_key", "message": format!("Key '{}' uses unsupported characters. Allowed: letters, digits, '.', '_', '-', '[' and ']'", key.chars().take(80).collect::<String>())}})),
-        )
-            .into_response());
+        let key: String = key.chars().take(80).collect();
+        return reject(invalid(
+            "invalid_key",
+            format!(
+                "Key '{key}' uses unsupported characters. Allowed: letters, digits, '.', '_', '-', '[' and ']'"
+            ),
+        ));
     }
     if let Some(key) = map
         .iter()
         .find(|(_, v)| v.len() > MAX_VALUE)
         .map(|(k, _)| k)
     {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"code": "value_too_large", "message": format!("The value of '{key}' exceeds 64 KiB")}})),
-        )
-            .into_response());
+        return reject(invalid(
+            "value_too_large",
+            format!("The value of '{key}' exceeds 64 KiB"),
+        ));
     }
-    let key = data_key(&state, &app).await?;
-    ensure_environment(&state.db, &app, &environment).await?;
+    Ok(map)
+}
+
+/// Writes changed keys (unchanged values make no new version) and, with `replace`, removes keys
+/// the file does not contain. Returns (written, unchanged, removed).
+pub async fn apply_import(
+    state: &AppState,
+    key: &DataKey,
+    app: &str,
+    environment: &str,
+    map: &props::Map,
+    replace: bool,
+    who: &str,
+) -> Result<(usize, usize, usize), ApiError> {
     let existing: Vec<(String,)> = sqlx::query_as(
         "SELECT name FROM vault_items WHERE app_id = ? AND environment = ? AND kind = 'key'",
     )
-    .bind(&app)
-    .bind(&environment)
+    .bind(app)
+    .bind(environment)
     .fetch_all(&state.db)
     .await?;
     let mut unchanged = 0;
     let mut changes = Vec::new();
-    for (name, value) in &map {
-        let same = if existing.iter().any(|(n,)| n == name) {
-            read_item(&state.db, &key, &app, &environment, Kind::Key, name, None)
+    for (name, value) in map {
+        let same = existing.iter().any(|(n,)| n == name)
+            && read_item(&state.db, key, app, environment, Kind::Key, name, None)
                 .await
-                .is_ok_and(|stored| stored.bytes == value.as_bytes())
-        } else {
-            false
-        };
+                .is_ok_and(|stored| stored.bytes == value.as_bytes());
         if same {
             unchanged += 1;
         } else {
             changes.push((name, value));
         }
     }
-    let who = actor.subject.clone();
     let mut tx = state.db.begin().await?;
     let mut removed = 0;
-    if input.replace {
+    if replace {
         for (name,) in existing.iter().filter(|(n,)| !map.contains_key(n)) {
-            sqlx::query("DELETE FROM vault_versions WHERE item_id IN (SELECT id FROM vault_items WHERE app_id = ? AND environment = ? AND kind = 'key' AND name = ?)")
-                .bind(&app).bind(&environment).bind(name).execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM vault_items WHERE app_id = ? AND environment = ? AND kind = 'key' AND name = ?")
-                .bind(&app).bind(&environment).bind(name).execute(&mut *tx).await?;
+            delete_item_rows(&mut tx, app, environment, Kind::Key, name).await?;
             removed += 1;
         }
     }
     for (name, value) in &changes {
         write_item(
             &mut tx,
-            &key,
-            &app,
-            &environment,
+            key,
+            app,
+            environment,
             Kind::Key,
             name,
             value.as_bytes(),
             "text/plain",
-            &who,
+            who,
         )
         .await?;
     }
     tx.commit().await?;
+    Ok((changes.len(), unchanged, removed))
+}
+
+/// Splits a `.properties` or dotenv file into individual keys. Unchanged values are skipped so
+/// re-importing the same file creates no new versions.
+pub async fn import(
+    State(state): State<AppState>,
+    Extension(access): Extension<Access>,
+    Extension(actor): Extension<Actor>,
+    Path((app, environment)): Path<(String, String)>,
+    Json(input): Json<Import>,
+) -> Result<Response, ApiError> {
+    access.require(&app)?;
+    let map = match parse_import(&input.format, &input.content) {
+        Ok(map) => map,
+        Err(response) => return Ok(*response),
+    };
+    let key = data_key(&state, &app).await?;
+    ensure_environment(&state.db, &app, &environment).await?;
+    if crate::approvals::is_protected(&state.db, &app, &environment).await? {
+        let payload = serde_json::to_vec(
+            &json!({"format": input.format, "content": input.content, "replace": input.replace}),
+        )
+        .map_err(|_| internal())?;
+        return crate::approvals::submit(
+            &state,
+            &actor,
+            &key,
+            crate::approvals::Proposal {
+                app: &app,
+                environment: &environment,
+                operation: "import",
+                kind: Kind::Key,
+                name: "(import)",
+                payload: Some(&payload),
+                content_type: "application/json",
+                summary: format!(
+                    "Import {} keys from a .{} file{}",
+                    map.len(),
+                    input.format,
+                    if input.replace {
+                        ", removing keys not in it"
+                    } else {
+                        ""
+                    }
+                ),
+            },
+        )
+        .await;
+    }
+    let (written, unchanged, removed) = apply_import(
+        &state,
+        &key,
+        &app,
+        &environment,
+        &map,
+        input.replace,
+        &actor.subject,
+    )
+    .await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.import",
         &format!(
-            "{app}/{environment}: {} written, {unchanged} unchanged, {removed} removed",
-            changes.len()
+            "{app}/{environment}: {written} written, {unchanged} unchanged, {removed} removed"
         ),
     )
     .await?;
     Ok(
-        Json(json!({"written": changes.len(), "unchanged": unchanged, "removed": removed}))
+        Json(json!({"written": written, "unchanged": unchanged, "removed": removed}))
             .into_response(),
     )
 }
@@ -1122,15 +1365,17 @@ pub async fn import(
 /// What an application token for this environment would receive (inheritance applied).
 pub async fn preview_config(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, environment)): Path<(String, String)>,
     Query(query): Query<FormatQuery>,
 ) -> Result<Response, ApiError> {
+    access.require(&app)?;
     let key = data_key(&state, &app).await?;
     ensure_environment(&state.db, &app, &environment).await?;
     let layers = resolve(&state.db, &key, &app, &environment).await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.config.reveal",
         &format!("{app}/{environment}"),
@@ -1148,10 +1393,12 @@ pub async fn preview_config(
 
 pub async fn list_tokens(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Path(app): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    access.require(&app)?;
     let rows: Vec<TokenRow> = sqlx::query_as(
-        "SELECT id, name, environment, created_by, created_at, expires_at, last_used_at, revoked_at
+        "SELECT id, name, environment, created_by, created_at, expires_at, last_used_at, revoked_at, allowed_cidrs
          FROM vault_tokens WHERE app_id = ? ORDER BY revoked_at IS NOT NULL, created_at DESC",
     )
     .bind(&app)
@@ -1159,9 +1406,9 @@ pub async fn list_tokens(
     .await?;
     let now = crate::now() as i64;
     Ok(Json(
-        json!({"items": rows.into_iter().map(|(id, name, environment, by, at, expires, used, revoked)| json!({
+        json!({"items": rows.into_iter().map(|(id, name, environment, by, at, expires, used, revoked, cidrs)| json!({
         "id": id, "name": name, "environment": environment, "createdBy": by, "createdAt": at,
-        "expiresAt": expires, "lastUsedAt": used, "revokedAt": revoked,
+        "expiresAt": expires, "lastUsedAt": used, "revokedAt": revoked, "allowedCidrs": cidrs,
         "active": revoked.is_none() && expires.is_none_or(|e| e > now),
     })).collect::<Vec<_>>()}),
     ))
@@ -1175,14 +1422,80 @@ pub struct NewToken {
     /// 0 or absent: no expiry.
     #[serde(default)]
     pub expires_in_days: Option<u32>,
+    /// `10.0.0.0/8, 192.168.1.10`: the token only works from these addresses. Empty: any.
+    #[serde(default)]
+    pub allowed_cidrs: Option<String>,
+}
+
+/// Normalises an allow-list (`None` = any address), or explains what is wrong with it.
+fn allow_list(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    let nets = crate::vault_api::parse_cidrs(raw).map_err(|_| {
+        bad(
+            "invalid_cidr",
+            "Use IP addresses or CIDR ranges, e.g. 10.0.0.0/8, 192.168.1.10",
+        )
+    })?;
+    if nets.len() > 50 {
+        return Err(bad("invalid_cidr", "At most 50 address ranges per token"));
+    }
+    Ok(Some(
+        nets.iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUpdate {
+    pub allowed_cidrs: Option<String>,
+}
+
+pub async fn update_token(
+    State(state): State<AppState>,
+    Extension(access): Extension<Access>,
+    Extension(actor): Extension<Actor>,
+    Path((app, id)): Path<(String, String)>,
+    Json(input): Json<TokenUpdate>,
+) -> Result<Json<Value>, ApiError> {
+    access.require(&app)?;
+    let cidrs = allow_list(input.allowed_cidrs.as_deref())?;
+    let updated = sqlx::query(
+        "UPDATE vault_tokens SET allowed_cidrs = ? WHERE app_id = ? AND id = ? AND revoked_at IS NULL",
+    )
+    .bind(&cidrs)
+    .bind(&app)
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(missing("token_not_found", "No active token with this id"));
+    }
+    audit(
+        &state,
+        &actor,
+        "vault.token.update",
+        &format!(
+            "{app} token {id}: allowed from {}",
+            cidrs.as_deref().unwrap_or("any address")
+        ),
+    )
+    .await?;
+    Ok(Json(json!({"id": id, "allowedCidrs": cidrs})))
 }
 
 pub async fn create_token(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path(app): Path<String>,
     Json(input): Json<NewToken>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    access.require(&app)?;
     if state.config.master_key.is_none() {
         return Err(sealed());
     }
@@ -1207,6 +1520,7 @@ pub async fn create_token(
             "Revoke unused tokens first (at most 50)",
         ));
     }
+    let cidrs = allow_list(input.allowed_cidrs.as_deref())?;
     let token = crypto::new_token();
     let expires_at = input
         .expires_in_days
@@ -1214,7 +1528,7 @@ pub async fn create_token(
         .map(|d| crate::now() as i64 + i64::from(d) * 86400);
     let who = actor.subject.clone();
     sqlx::query(
-        "INSERT INTO vault_tokens (id, app_id, environment, name, secret_hash, created_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO vault_tokens (id, app_id, environment, name, secret_hash, created_by, expires_at, allowed_cidrs, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&token.id)
     .bind(&app)
@@ -1223,10 +1537,12 @@ pub async fn create_token(
     .bind(&token.digest)
     .bind(&who)
     .bind(expires_at)
+    .bind(&cidrs)
+    .bind(crate::now() as i64)
     .execute(&state.db)
     .await?;
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.token.create",
         &format!("{app}/{} token {}", input.environment, token.id),
@@ -1243,12 +1559,15 @@ pub async fn create_token(
 
 pub async fn revoke_token(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(actor): Extension<Actor>,
     Path((app, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    access.require(&app)?;
     let revoked = sqlx::query(
-        "UPDATE vault_tokens SET revoked_at = unixepoch() WHERE app_id = ? AND id = ? AND revoked_at IS NULL",
+        "UPDATE vault_tokens SET revoked_at = ? WHERE app_id = ? AND id = ? AND revoked_at IS NULL",
     )
+    .bind(crate::now() as i64)
     .bind(&app)
     .bind(&id)
     .execute(&state.db)
@@ -1257,7 +1576,7 @@ pub async fn revoke_token(
         return Err(missing("token_not_found", "No active token with this id"));
     }
     audit(
-        &state.db,
+        &state,
         &actor,
         "vault.token.revoke",
         &format!("{app} token {id}"),
@@ -1297,21 +1616,71 @@ const PULL_EVENTS: &str =
     "(event LIKE '%.read' OR event LIKE '%.reveal' OR event = 'vault.token.denied')";
 const CHANGE_EVENTS: &str = "(event LIKE '%.write' OR event LIKE '%.delete' OR event LIKE '%.create' OR event LIKE '%.update' OR event LIKE '%.rollback' OR event = 'vault.import' OR event = 'vault.token.revoke')";
 
-/// One filter shared by the list, the CSV export and the summary. Binds: ?1 app, ?2 kind, ?3 q,
-/// ?4 from, ?5 to.
-fn audit_filter() -> String {
-    format!(
-        "event LIKE 'vault.%'
-         AND (?1 IS NULL OR target = ?1 OR target LIKE ?1 || '/%' OR target LIKE ?1 || ' %')
-         AND (?2 IS NULL
-              OR (?2 = 'pulls' AND {PULL_EVENTS})
-              OR (?2 = 'changes' AND {CHANGE_EVENTS})
-              OR (?2 = 'denied' AND event = 'vault.token.denied')
-              OR (?2 = 'tokens' AND event LIKE 'vault.token.%'))
-         AND (?3 IS NULL OR instr(lower(subject || ' ' || COALESCE(target, '') || ' ' || COALESCE(ip, '') || ' ' || COALESCE(user_agent, '')), lower(?3)) > 0)
-         AND (?4 IS NULL OR created_at >= ?4)
-         AND (?5 IS NULL OR created_at <= ?5)"
-    )
+/// Bound values for a dynamically built filter (plain `?` placeholders work on both engines).
+pub enum Bind {
+    Text(String),
+    Int(i64),
+}
+
+fn apply<'q>(
+    mut query: sqlx::query::QueryAs<'q, sqlx::Any, AuditRow, sqlx::any::AnyArguments<'q>>,
+    binds: &[Bind],
+) -> sqlx::query::QueryAs<'q, sqlx::Any, AuditRow, sqlx::any::AnyArguments<'q>> {
+    for b in binds {
+        query = match b {
+            Bind::Text(t) => query.bind(t.clone()),
+            Bind::Int(i) => query.bind(*i),
+        };
+    }
+    query
+}
+
+/// Rows of one application: its own events (`billing`, `billing/prod/...`, `billing token ...`).
+fn app_condition(app: Option<&str>, sql: &mut String, binds: &mut Vec<Bind>) {
+    if let Some(app) = app {
+        sql.push_str(" AND (target = ? OR target LIKE ? OR target LIKE ?)");
+        binds.push(Bind::Text(app.to_owned()));
+        binds.push(Bind::Text(format!("{app}/%")));
+        binds.push(Bind::Text(format!("{app} %")));
+    }
+}
+
+/// The filter shared by the list and the CSV export. `kind` is validated by the caller.
+fn audit_filter(
+    app: Option<&str>,
+    kind: Option<&str>,
+    q: Option<&str>,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> (String, Vec<Bind>) {
+    let mut sql = String::from("event LIKE 'vault.%'");
+    let mut binds = Vec::new();
+    app_condition(app, &mut sql, &mut binds);
+    match kind {
+        Some("pulls") => sql.push_str(&format!(" AND {PULL_EVENTS}")),
+        Some("changes") => sql.push_str(&format!(" AND {CHANGE_EVENTS}")),
+        Some("denied") => sql.push_str(" AND event = 'vault.token.denied'"),
+        Some("tokens") => sql.push_str(" AND event LIKE 'vault.token.%'"),
+        _ => {}
+    }
+    if let Some(q) = q {
+        sql.push_str(
+            " AND (instr(lower(subject), ?) > 0 OR instr(lower(COALESCE(target, '')), ?) > 0
+                  OR instr(lower(COALESCE(ip, '')), ?) > 0 OR instr(lower(COALESCE(user_agent, '')), ?) > 0)",
+        );
+        for _ in 0..4 {
+            binds.push(Bind::Text(q.to_lowercase()));
+        }
+    }
+    if let Some(from) = from {
+        sql.push_str(" AND created_at >= ?");
+        binds.push(Bind::Int(from));
+    }
+    if let Some(to) = to {
+        sql.push_str(" AND created_at <= ?");
+        binds.push(Bind::Int(to));
+    }
+    (sql, binds)
 }
 
 fn csv_field(value: &str) -> String {
@@ -1324,15 +1693,32 @@ fn csv_field(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-pub async fn audit_log(
-    State(state): State<AppState>,
-    Extension(actor): Extension<Actor>,
-    Query(query): Query<AuditQuery>,
-) -> Result<Response, ApiError> {
-    let app = query.app.filter(|a| !a.is_empty());
+/// Administrators see everything; application owners must name one of their applications.
+fn audit_scope(access: &Access, app: Option<String>) -> Result<Option<String>, ApiError> {
     if app.as_deref().is_some_and(|a| !valid_app_id(a)) {
         return Err(bad("invalid_app", "Unknown application filter"));
     }
+    match &app {
+        Some(app) => access.require(app)?,
+        None if !access.admin => {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "app_required",
+                "Choose one of your applications to see its audit log",
+            ));
+        }
+        None => {}
+    }
+    Ok(app)
+}
+
+pub async fn audit_log(
+    State(state): State<AppState>,
+    Extension(access): Extension<Access>,
+    Extension(actor): Extension<Actor>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Response, ApiError> {
+    let app = audit_scope(&access, query.app.filter(|a| !a.is_empty()))?;
     let kind = query.kind.filter(|k| !k.is_empty() && k != "all");
     if kind
         .as_deref()
@@ -1353,24 +1739,28 @@ pub async fn audit_log(
     } else {
         query.limit.unwrap_or(100).clamp(1, 500)
     };
-    let sql = format!(
-        "SELECT id, subject, event, target, ip, user_agent, created_at FROM audit_events
-         WHERE {} AND (?6 IS NULL OR id < ?6) ORDER BY id DESC LIMIT ?7",
-        audit_filter()
+    let (filter, mut binds) = audit_filter(
+        app.as_deref(),
+        kind.as_deref(),
+        q.as_deref(),
+        query.from,
+        query.to,
     );
-    let rows: Vec<AuditRow> = sqlx::query_as(&sql)
-        .bind(&app)
-        .bind(&kind)
-        .bind(&q)
-        .bind(query.from)
-        .bind(query.to)
-        .bind(query.before)
-        .bind(limit + 1)
+    let mut sql = format!(
+        "SELECT id, subject, event, target, ip, user_agent, created_at FROM audit_events WHERE {filter}"
+    );
+    if let Some(before) = query.before {
+        sql.push_str(" AND id < ?");
+        binds.push(Bind::Int(before));
+    }
+    sql.push_str(" ORDER BY id DESC LIMIT ?");
+    binds.push(Bind::Int(limit + 1));
+    let rows: Vec<AuditRow> = apply(sqlx::query_as(&sql), &binds)
         .fetch_all(&state.db)
         .await?;
     if csv {
         audit(
-            &state.db,
+            &state,
             &actor,
             "vault.audit.export",
             app.as_deref().unwrap_or("all applications"),
@@ -1427,7 +1817,7 @@ pub async fn audit_log(
 }
 
 /// `2026-11-03T16:22:51Z` without a date-time dependency.
-fn chrono_like(unix: i64) -> String {
+pub fn chrono_like(unix: i64) -> String {
     let days = unix.div_euclid(86_400);
     let secs = unix.rem_euclid(86_400);
     // Civil-from-days (Howard Hinnant).
@@ -1451,24 +1841,29 @@ fn chrono_like(unix: i64) -> String {
 /// Last-24-hour totals for the audit screen.
 pub async fn audit_summary(
     State(state): State<AppState>,
+    Extension(access): Extension<Access>,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let app = query.app.filter(|a| !a.is_empty() && valid_app_id(a));
+    let app = audit_scope(&access, query.app.filter(|a| !a.is_empty()))?;
     let since = crate::now() as i64 - 86_400;
-    let (pulls, denied, changes, ips, apps): (i64, i64, i64, i64, i64) = sqlx::query_as(&format!(
-        "SELECT COALESCE(SUM({PULL_EVENTS} AND event != 'vault.token.denied'), 0),
-                COALESCE(SUM(event = 'vault.token.denied'), 0),
-                COALESCE(SUM({CHANGE_EVENTS}), 0),
+    let mut sql = format!(
+        "SELECT CAST(COALESCE(SUM(CASE WHEN {PULL_EVENTS} AND event <> 'vault.token.denied' THEN 1 ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(CASE WHEN event = 'vault.token.denied' THEN 1 ELSE 0 END), 0) AS SIGNED),
+                CAST(COALESCE(SUM(CASE WHEN {CHANGE_EVENTS} THEN 1 ELSE 0 END), 0) AS SIGNED),
                 COUNT(DISTINCT ip),
                 COUNT(DISTINCT CASE WHEN subject LIKE 'token:%' THEN subject END)
-         FROM audit_events
-         WHERE event LIKE 'vault.%' AND created_at >= ?2
-           AND (?1 IS NULL OR target = ?1 OR target LIKE ?1 || '/%' OR target LIKE ?1 || ' %')"
-    ))
-    .bind(&app)
-    .bind(since)
-    .fetch_one(&state.db)
-    .await?;
+         FROM audit_events WHERE event LIKE 'vault.%' AND created_at >= ?"
+    );
+    let mut binds = vec![Bind::Int(since)];
+    app_condition(app.as_deref(), &mut sql, &mut binds);
+    let mut query = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(&sql);
+    for b in &binds {
+        query = match b {
+            Bind::Text(t) => query.bind(t.clone()),
+            Bind::Int(i) => query.bind(*i),
+        };
+    }
+    let (pulls, denied, changes, ips, apps) = query.fetch_one(&state.db).await?;
     Ok(Json(json!({
         "since": since, "pulls": pulls, "denied": denied, "changes": changes,
         "distinctIps": ips, "activeTokens": apps,

@@ -17,7 +17,7 @@ export type DocBlock =
 
 export interface DocGuide { id: string; group: string; title: string; summary: string; blocks: DocBlock[] }
 
-export const DOC_GROUPS = ['Start here', 'Administer', 'Integrate', 'Reference'];
+export const DOC_GROUPS = ['Start here', 'Administer', 'Integrate', 'Operate', 'Reference'];
 
 export interface Stack { id: string; label: string; caption: string; code: string }
 
@@ -61,6 +61,11 @@ if err != nil || res.StatusCode != 200 {
 }
 var config map[string]string
 json.NewDecoder(res.Body).Decode(&config)` },
+  { id: 'cli', label: 'keystone CLI', caption: 'Any language: start the app with every key in its environment', code: `# The same single binary is also the client (no server-side setup)
+export KEYSTONE_URL={{ORIGIN}} KEYSTONE_TOKEN=ksv_...
+keystone run -- java -jar orders-service.jar
+keystone pull --format=properties --out=config/application.properties
+keystone get key spring.datasource.password` },
   { id: 'file', label: 'Whole file', caption: 'Write application.properties to disk before start', code: `curl -fsS -H "Authorization: Bearer $KEYSTONE_TOKEN" \\
   -o config/application.properties \\
   "$KEYSTONE_URL/api/v1/vault/files/application.properties"
@@ -84,6 +89,14 @@ export const ENDPOINTS: Endpoint[] = [
   { method: 'POST', path: '/api/v1/admin/vault/apps/{app}/tokens', summary: 'Issue an access token (returned once)', auth: 'Admin' },
   { method: 'DELETE', path: '/api/v1/admin/vault/apps/{app}/tokens/{id}', summary: 'Revoke a token immediately', auth: 'Admin' },
   { method: 'GET', path: '/api/v1/admin/vault/audit?app=&kind=pulls', summary: 'Who pulled what, when and from which IP', auth: 'Admin' },
+  { method: 'GET', path: '/api/v1/vault/watch?version=&timeout=30', summary: 'Long-poll until the configuration changes (live reload)', auth: 'App token' },
+  { method: 'PUT', path: '/api/v1/admin/vault/apps/{app}/environments/{env}/protection', summary: 'Protect an environment ({"protected": true})', auth: 'Admin' },
+  { method: 'POST', path: '/api/v1/admin/vault/apps/{app}/environments/{env}/promote', summary: 'Compare ({"from","dryRun":true}) or copy items between environments', auth: 'Admin' },
+  { method: 'GET', path: '/api/v1/admin/vault/changes?status=pending', summary: 'Change requests waiting for approval', auth: 'Admin' },
+  { method: 'POST', path: '/api/v1/admin/vault/changes/{id}/approve', summary: 'Approve and apply (a different administrator)', auth: 'Admin' },
+  { method: 'PATCH', path: '/api/v1/admin/vault/apps/{app}/tokens/{id}', summary: 'Change a token\'s IP allow-list', auth: 'Admin' },
+  { method: 'GET', path: '/api/v1/admin/vault/insights', summary: 'Health checks', auth: 'Admin' },
+  { method: 'POST', path: '/api/v1/admin/vault/backups', summary: 'Take a backup now', auth: 'Admin' },
   { method: 'GET', path: '/health/ready', summary: 'Readiness (database reachable)', auth: 'Public' },
 ];
 
@@ -240,6 +253,167 @@ spring.cloud.config.fail-fast=true` },
     ],
   },
   {
+    id: 'install', group: 'Start here', title: 'Install & configure',
+    summary: 'One binary, one folder, one optional config file. Running in a minute, production-ready in ten.',
+    blocks: [
+      { kind: 'p', text: 'Keystone Vault ships as a **single executable** with the console built in, like Portal SSO\'s single jar. On first start it creates its home folder (`~/.keystone`, or `/var/lib/keystone` as a service) with the database, a generated master key in `secrets/master.key`, and a fully commented `keystone.properties`.' },
+      { kind: 'code', label: 'Linux / macOS installer (downloads the latest release, verifies its checksum)', code: `curl -fsSL https://raw.githubusercontent.com/tanmaysinghx/keystone-vault/main/install.sh | bash
+keystone          # prints a one-time setup key, then open http://127.0.0.1:8090` },
+      { kind: 'h', text: 'First-time setup' },
+      { kind: 'steps', items: [
+        { title: 'License', body: 'Read and accept the Apache License 2.0.' },
+        { title: 'Setup key', body: 'Paste the key Keystone printed at startup (also in `secrets/setup.key` in its home). It proves you control the server, not just the web page.' },
+        { title: 'Sign-in', body: 'Choose [Portal SSO, local accounts, or both](signin). Local accounts need a first administrator.' },
+        { title: 'Database', body: 'Keep the built-in SQLite, or [connect MySQL](database). Keystone copies what setup has stored, saves the choice to `keystone.properties`, and restarts by itself.' },
+      ] },
+      { kind: 'code', label: 'Docker (open the console and follow setup; the key is in docker logs keystone)', code: `docker run -d --name keystone -p 8090:8090 \\
+  -v keystone-data:/var/lib/keystone \\
+  ghcr.io/tanmaysinghx/keystone-vault:latest` },
+      { kind: 'code', label: 'Unattended (CI, Kubernetes): skip the wizard', code: `KEYSTONE_SETUP_ACCEPT_LICENSE=true        # you accept the Apache-2.0 license
+KEYSTONE_PORTAL_URL=https://sso.example.com KEYSTONE_PORTAL_CLIENT_ID=keystone
+# and/or a first local administrator (remove the password after the first sign-in):
+KEYSTONE_BOOTSTRAP_ADMIN_EMAIL=ops@example.com KEYSTONE_BOOTSTRAP_ADMIN_PASSWORD=...
+KEYSTONE_STORAGE_DATABASE_URL=mysql://keystone:...@db:3306/keystone   # optional` },
+      { kind: 'code', label: 'As a Linux service (installer with --service)', code: `curl -fsSL https://raw.githubusercontent.com/tanmaysinghx/keystone-vault/main/install.sh | sudo bash -s -- --service
+sudo nano /etc/keystone/keystone.properties
+sudo systemctl restart keystone` },
+      { kind: 'h', text: 'One configuration file' },
+      { kind: 'p', text: 'Every setting lives in `keystone.properties`. Uncomment what you need and restart. Precedence, highest first: command line (`--server.port=9000`), environment (`KEYSTONE_SERVER_PORT=9000`: upper case, `.` and `-` become `_`), the file, built-in defaults. `keystone config` prints the effective configuration with secrets redacted.' },
+      { kind: 'table', head: ['Setting', 'Default', 'Purpose'], rows: [
+        ['`server.address` / `server.port`', '`127.0.0.1` / `8090`', 'Listen address. `0.0.0.0` in containers'],
+        ['`server.trust-proxy`', '`false`', 'Real client IPs from `X-Forwarded-For` behind your proxy'],
+        ['`auth.local`', '`false` (setup sets it)', 'Email + password accounts, with or without Portal SSO'],
+        ['`storage.database-url`', 'built-in SQLite', '`mysql://user:pass@host:3306/keystone` for MySQL 8+ / MariaDB'],
+        ['`portal.url` / `portal.client-id`', '', 'Portal SSO. Easiest: `keystone connect-portal`'],
+        ['`vault.master-key-file`', '`secrets/master.key`', 'Or `vault.master-key` inline. Generated on first start'],
+        ['`backup.interval-hours` / `backup.keep`', '`24` / `14`', 'Automatic encrypted snapshots'],
+        ['`security.failed-token-limit` / `lockout-minutes`', '`10` / `15`', 'IP lockout after failed token attempts'],
+        ['`security.rotation-days`', '`90`', 'Flag keys not changed for longer'],
+        ['`alerts.webhook-url`', '', 'Slack / Teams / JSON webhook (or set in Settings)'],
+      ] },
+      { kind: 'note', tone: 'warn', text: '**Back up `secrets/master.key` somewhere other than the server** (a password manager or your secret store). Data backups never include it, and without it nothing can be decrypted.' },
+    ],
+  },
+  {
+    id: 'roles', group: 'Administer', title: 'Roles & access',
+    summary: 'Use Portal SSO roles to let each team manage only its own application.',
+    blocks: [
+      { kind: 'table', head: ['Portal role', 'Can'], rows: [
+        ['`ROLE_ADMIN`', 'Everything: create and delete applications, protect environments, approve changes, settings, backups, the full audit log'],
+        ['`ROLE_VAULT_<APP>`', 'Manage one application: its keys, files, environments, tokens, promote, approvals and audit log. Example: `orders-service` → `ROLE_VAULT_ORDERS_SERVICE`'],
+      ] },
+      { kind: 'steps', items: [
+        { title: 'Copy the role name', body: 'In the application\'s **⋯** menu, under "Portal role for owners".' },
+        { title: 'Create it in Portal SSO', body: 'Portal → **Roles** → New role, then assign it to the team\'s users.' },
+        { title: 'They sign in to Keystone', body: 'The sidebar lists only their applications. Roles change on their next sign-in.' },
+      ] },
+    ],
+  },
+  {
+    id: 'signin', group: 'Administer', title: 'Sign-in: Portal SSO or local accounts',
+    summary: 'Use Portal SSO, Keystone\'s own email-and-password accounts, or both.',
+    blocks: [
+      { kind: 'table', head: ['Mode', 'Good for', 'How'], rows: [
+        ['**Portal SSO**', 'Teams already on Portal: one identity, MFA, offboarding in one place', 'Setup wizard, or `keystone connect-portal https://sso…`'],
+        ['**Local accounts**', 'Running without Portal, small teams, isolated networks', 'Setup wizard creates the first administrator; add others in **Settings → Users**'],
+        ['**Both**', 'A break-glass administrator that still works when Portal is down', 'Enable both in the wizard, or set `auth.local=true` next to `portal.url`'],
+      ] },
+      { kind: 'p', text: 'Local accounts use the same roles as Portal: **Administrator** (`ROLE_ADMIN`) or owner of specific applications (`ROLE_VAULT_<APP>`). Passwords need at least 12 characters mixing three character classes and are stored as Argon2id hashes. Repeated failed sign-ins lock the address out (`security.failed-token-limit`), and every sign-in, success or failure, is in the audit log.' },
+      { kind: 'list', items: [
+        'Sessions last `auth.session-hours` (12 by default). Signing out, a password change, or disabling the user ends them.',
+        'Without Portal SSO, the last enabled administrator cannot be deleted, disabled or demoted, so you can never lock yourself out.',
+        'Anyone signed in with a local account can change their own password from the account panel.',
+      ] },
+    ],
+  },
+  {
+    id: 'database', group: 'Operate', title: 'Database: SQLite or MySQL',
+    summary: 'Built-in SQLite needs nothing installed. MySQL 8.0+ or MariaDB 10.6+ when you want a managed database.',
+    blocks: [
+      { kind: 'p', text: 'Secrets are encrypted before they reach either database, and the master key never goes into it. SQLite keeps everything in one file in the Keystone home and suits most teams. Use MySQL for an existing managed database, its backups and high availability.' },
+      { kind: 'code', label: 'Prepare MySQL (once)', code: `CREATE DATABASE keystone CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE USER 'keystone'@'%' IDENTIFIED BY 'a-long-random-password';
+GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%';` },
+      { kind: 'code', label: 'keystone.properties', code: `storage.database-url=mysql://keystone:a-long-random-password@db.example.com:3306/keystone?ssl-mode=required` },
+      { kind: 'p', text: 'Keystone creates its tables on start. Choose it in the setup wizard (**Database → MySQL → Test connection**), or move a running vault, with all applications, secrets, users and audit history, with:' },
+      { kind: 'code', label: 'Move an existing vault (stop Keystone first)', code: `keystone migrate --to "mysql://keystone:…@db.example.com:3306/keystone?ssl-mode=required"
+keystone        # now runs on MySQL; the old SQLite file is left untouched` },
+      { kind: 'list', items: [
+        'On MySQL, backups are portable `.json` exports (still encrypted). `keystone restore FILE` restores `.db` or `.json` into either database.',
+        'Percent-encode special characters in the password (`@` → `%40`). The URL is stored only in `keystone.properties` (mode 600) and is never shown in the console or logs.',
+        'CI runs the entire test suite against MySQL 8.4 as well as SQLite.',
+      ] },
+    ],
+  },
+  {
+    id: 'approvals', group: 'Administer', title: 'Protected environments & approvals',
+    summary: 'Two-person control for production: every change needs a second administrator.',
+    blocks: [
+      { kind: 'p', text: 'An administrator protects an environment from its **⋯** menu. From then on, every set, delete, rollback, import and promote there becomes a **change request**: its proposed content is stored encrypted, and nothing changes until a *different* person approves it under **Security → Approvals**. Approvals show the current and proposed values side by side (audited as a reveal).' },
+      { kind: 'list', items: [
+        'You cannot approve your own change. Withdrawing it is recorded as cancelled.',
+        'Approval applies the change exactly once, even if two people click at the same time.',
+        'Values record who made them: `admin:alice (approved by admin:bob)`.',
+        'Turning protection off needs an administrator, is audited, and triggers an alert.',
+      ] },
+      { kind: 'h', text: 'Compare & promote' },
+      { kind: 'p', text: '**⋯ → Compare & promote** lists which keys and files differ between two environments without revealing any value, then copies the ones you tick. Into a protected environment, each item becomes a change request.' },
+    ],
+  },
+  {
+    id: 'reload', group: 'Integrate', title: 'Live reload & CLI',
+    summary: 'Pick up changes without restarting, and use the keystone binary as a client.',
+    blocks: [
+      { kind: 'p', text: '`/api/v1/vault/config` sends an `ETag`. `If-None-Match` with the current one answers 304 (nothing is disclosed or audited). `/api/v1/vault/watch?version=…&timeout=30` waits until the configuration changes, then returns the new version, so a running app knows exactly when to fetch again.' },
+      { kind: 'code', label: 'Node.js: watch and reload', code: `let version = null;
+for (;;) {
+  const r = await fetch(\`\${process.env.KEYSTONE_URL}/api/v1/vault/watch?timeout=30\${version ? '&version=' + version : ''}\`,
+    { headers: { Authorization: \`Bearer \${process.env.KEYSTONE_TOKEN}\` } });
+  const { version: latest, changed } = await r.json();
+  if (changed || version === null) reload();   // fetch /api/v1/vault/config again
+  version = latest;
+}` },
+      { kind: 'p', text: 'Spring Boot: add `spring-boot-starter-actuator` and call `POST /actuator/refresh` when the watch reports a change; `@RefreshScope` beans pick up the new values.' },
+      { kind: 'h', text: 'keystone CLI' },
+      { kind: 'code', label: 'Read-only, with an application token', code: `export KEYSTONE_URL={{ORIGIN}} KEYSTONE_TOKEN=ksv_...
+keystone run -- ./start-my-app.sh          # every key as an environment variable
+keystone pull --format=env --out=.env       # json | properties | env | shell
+keystone get file application.properties --out=config/application.properties
+keystone whoami` },
+    ],
+  },
+  {
+    id: 'backups', group: 'Operate', title: 'Backups, restore & key rotation',
+    summary: 'Encrypted snapshots on a schedule, verified restores, and master-key rotation without re-encrypting.',
+    blocks: [
+      { kind: 'p', text: 'Keystone takes a consistent snapshot every `backup.interval-hours` (default 24) into `backup.dir`, keeping the newest `backup.keep`. **Settings → Backups** lists them, takes one now, and downloads them. Secrets stay encrypted inside; the master key is never included.' },
+      { kind: 'code', label: 'Command line', code: `keystone backup                      # now, into backup.dir
+keystone restore keystone-auto-20261103T020000Z.db   # stop the server first
+keystone rotate-master-key           # stop the server first` },
+      { kind: 'list', items: [
+        '**Restore** first proves the snapshot opens with the current master key, then saves the current database as `*.pre-restore-*.db` before replacing it.',
+        '**Rotate** re-wraps each application\'s key under a new master key (no secret is re-encrypted), takes a pre-rotation snapshot, installs the new key file, and keeps the old one as `master.key.retired-*`. You need the old key only to restore backups taken before the rotation: `keystone restore FILE --vault.master-key-file=secrets/master.key.retired-…`.',
+        'Starting with the wrong master key is refused with a clear message, instead of failing every request.',
+      ] },
+    ],
+  },
+  {
+    id: 'alerts', group: 'Operate', title: 'Alerts & health checks',
+    summary: 'Hear about what matters immediately, and see what to fix in one list.',
+    blocks: [
+      { kind: 'p', text: '**Settings → Alerts** takes a Slack or Microsoft Teams incoming-webhook URL, or any HTTPS endpoint that accepts JSON (`text`, `event`, `subject`, `ip`, `time`). **Send test alert** checks it. The URL is stored encrypted.' },
+      { kind: 'table', head: ['Alert', 'When'], rows: [
+        ['Token refused', 'Wrong secret, revoked, expired, or from an address outside its allow-list'],
+        ['Lockout', 'An IP made `security.failed-token-limit` failed attempts'],
+        ['Protected reveal', 'Someone revealed a value in a protected environment'],
+        ['Approval needed', 'A change request was created'],
+        ['Deletion / protection off', 'An application, environment, key or file was deleted, or protection was removed'],
+        ['Audit export, backup failed', 'Self-explanatory'],
+      ] },
+      { kind: 'p', text: 'Repeats are throttled to one per event, target and IP every 10 minutes. **Security → Health checks** ranks what to fix: backups off or stale, the master key stored only next to the data, expiring, unused or unrestricted tokens, keys not rotated, unprotected production environments, refused tokens and pending approvals.' },
+    ],
+  },
+  {
     id: 'api', group: 'Reference', title: 'HTTP API',
     summary: 'Endpoints applications and administrators call.',
     blocks: [
@@ -271,7 +445,9 @@ spring.cloud.config.fail-fast=true` },
         ['`KEYSTONE_MASTER_KEY`', '32 bytes, base64. Unset: vault sealed'],
         ['`PORTAL_URL` / `PORTAL_CLIENT_ID`', 'Portal SSO issuer and Keystone\'s public client'],
         ['`KEYSTONE_TRUST_PROXY`', '`true` only behind a reverse proxy (client IPs in audit)'],
-        ['`KEYSTONE_BIND`', 'Listen address, default `127.0.0.1:8090`. Serve over HTTPS.'],
+        ['`server.port` / `server.address`', 'Listen address, default `127.0.0.1:8090`. Serve over HTTPS.'],
+        ['`auth.local`', 'Local email + password accounts'],
+        ['`storage.database-url`', 'SQLite (default) or `mysql://…`'],
       ] },
     ],
   },

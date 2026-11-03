@@ -1,0 +1,173 @@
+name: Build release
+
+# Builds and publishes one release: the single binary for five platforms (console embedded), SHA-256
+# checksums, a multi-arch container image on GHCR, and a GitHub release with install notes.
+# Called by CI on every green push to main (v1.0.<run number>) and by release.yml for manual tags.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version without the leading v, e.g. 1.0.42
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  KEYSTONE_VERSION: ${{ inputs.version }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  console:
+    name: Console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm --prefix ui ci && npm --prefix ui run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-console
+          path: ui/dist/
+          retention-days: 3
+
+  binaries:
+    name: Binary (${{ matrix.asset }})
+    needs: [console]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: linux-x86_64 }
+          # Ubuntu 22.04 runners: binaries need only glibc 2.35, so they run on most current distros.
+          # Arm runners are free for public repositories; a private repo needs a plan that includes them.
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: linux-aarch64 }
+          - { os: macos-15, target: aarch64-apple-darwin, asset: macos-aarch64 }
+          # The last Intel macOS image on GitHub-hosted runners.
+          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: macos-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: windows-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-console
+          path: ui/dist/
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release -p keystone --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir=target/${{ matrix.target }}/release
+          cp README.md LICENSE "$dir/"
+          cp back/keystone.properties.template "$dir/keystone.properties.example"
+          if [ "${{ runner.os }}" = Windows ]; then
+            name=keystone-${{ matrix.asset }}.zip
+            (cd "$dir" && 7z a -tzip "../../../$name" keystone.exe README.md LICENSE keystone.properties.example >/dev/null)
+            sha256sum "$name" > "$name.sha256"
+          else
+            name=keystone-${{ matrix.asset }}.tar.gz
+            "$dir/keystone" version
+            tar -czf "$name" -C "$dir" keystone README.md LICENSE keystone.properties.example
+            if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset }}
+          path: keystone-${{ matrix.asset }}.*
+          retention-days: 3
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: KEYSTONE_VERSION=${{ inputs.version }}
+          tags: |
+            ${{ steps.name.outputs.image }}:${{ inputs.version }}
+            ${{ steps.name.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.title=Keystone Vault
+            org.opencontainers.image.version=${{ inputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: GitHub release
+    needs: [binaries, image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-*
+          path: dist/
+          merge-multiple: true
+      - run: ls -la dist/ && cat dist/*.sha256 > dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: Keystone Vault v${{ inputs.version }}
+          make_latest: true
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            ## Keystone Vault v${{ inputs.version }}
+
+            One executable with the console built in. No runtime, database server or web server needed.
+
+            ### Install
+            ```bash
+            # Linux / macOS (verifies the checksum)
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            # ...or as a systemd service
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sudo bash -s -- --service
+            # Docker
+            docker run -d -p 8090:8090 -v keystone-data:/var/lib/keystone ghcr.io/${{ github.repository }}:${{ inputs.version }}
+            ```
+
+            ### First start
+            ```bash
+            keystone connect-portal https://your-portal   # a Portal admin approves it
+            keystone                                      # http://127.0.0.1:8090
+            ```
+            Configuration lives in one file, `~/.keystone/keystone.properties` (`keystone.properties.example`
+            is included in every archive). **Back up `~/.keystone/secrets/master.key` separately.**
+
+            | Platform | Download |
+            |---|---|
+            | Linux x86_64 | `keystone-linux-x86_64.tar.gz` |
+            | Linux arm64 | `keystone-linux-aarch64.tar.gz` |
+            | macOS Apple silicon | `keystone-macos-aarch64.tar.gz` |
+            | macOS Intel | `keystone-macos-x86_64.tar.gz` |
+            | Windows x86_64 | `keystone-windows-x86_64.zip` |
+
+            Verify: `sha256sum -c SHA256SUMS --ignore-missing`
